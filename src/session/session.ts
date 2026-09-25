@@ -261,7 +261,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         await runInstruction(text, true);
         return;
       }
-      const handled = await handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot, learnerStore: learner.store });
+      const handled = await handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot, learnerStore: learner.store, orchestrator });
       prompt();
       if (handled === "exit") shutdown(0);
       return;
@@ -270,7 +270,6 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   };
 
   const runInstruction = async (text: string, isCorrection: boolean): Promise<void> => {
-
     rendering = true;
     const started = Date.now();
     try {
@@ -285,9 +284,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       out(`\n[${result.status} in ${elapsed}s]`);
       if (result.gate) out(`Gate: ${result.gate.verdict} — ${result.gate.summary}`);
       if (result.detail) out(`detail: ${result.detail}`);
-      renderBudgetBar(budget);
-    } catch (err) {
-      out(`\nerror: ${(err as Error).message}`);
+      renderBudgetBar(budget, orchestrator.waitingWorkerIds().length);
     } finally {
       rendering = false;
       prompt();
@@ -311,6 +308,7 @@ async function handleSlashCommand(
     shutdown: (code: number) => void;
     projectRoot: string;
     learnerStore: MemoryStore;
+    orchestrator: Orchestrator;
   },
 ): Promise<"exit" | undefined> {
   const [cmd, ...args] = line.slice(1).split(/\s+/);
@@ -368,11 +366,13 @@ async function handleSlashCommand(
     case "status": {
       const u = deps.budget.used;
       const l = deps.budget.limitsValue;
+      const waiting = deps.orchestrator.waitingWorkerIds();
       out([
         `model      ${deps.config.model.provider}/${deps.config.model.name}`,
         `tokens     ${u.tokens} / ${l.maxTotalTokens}`,
         `tool calls ${u.toolCalls} / ${l.maxToolCalls}`,
         `workers    ${u.workersSpawned} / ${l.maxWorkerSpawns} (parallel ${u.runningWorkers}/${l.maxParallelWorkers})`,
+        `waiting    ${waiting.length ? waiting.join(", ") : "(none)"}`,
         `wall time  ${Math.round((Date.now() - u.startedAt) / 1000)}s / ${l.maxWallTimeSeconds}s`,
       ].join("\n"));
       return;
@@ -415,10 +415,11 @@ function printBanner(config: SynergonConfig, taskId: string): void {
   ].join("\n"));
 }
 
-function renderBudgetBar(budget: BudgetEnforcer): void {
+function renderBudgetBar(budget: BudgetEnforcer, waitingWorkers = 0): void {
   const u = budget.used;
   const l = budget.limitsValue;
   const tokPct = Math.min(100, Math.round((u.tokens / Math.max(1, l.maxTotalTokens)) * 100));
   const toolPct = Math.min(100, Math.round((u.toolCalls / Math.max(1, l.maxToolCalls)) * 100));
-  out(`budget: tokens ${u.tokens}/${l.maxTotalTokens} (${tokPct}%) · tools ${u.toolCalls}/${l.maxToolCalls} (${toolPct}%)`);
+  const waitInfo = waitingWorkers > 0 ? ` · waiting: ${waitingWorkers}` : "";
+  out(`budget: tokens ${u.tokens}/${l.maxTotalTokens} (${tokPct}%) · tools ${u.toolCalls}/${l.maxToolCalls} (${toolPct}%)${waitInfo}`);
 }
