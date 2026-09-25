@@ -19,6 +19,7 @@ import { loadSkills } from "../skills/loader.ts";
 import { SkillRouter } from "../skills/router.ts";
 import { MemoryStore } from "../memory/store.ts";
 import { FailureLearner } from "../memory/pipeline.ts";
+import { Orchestrator } from "../workers/orchestrator.ts";
 
 /**
  * Interactive session (Part 60/62): terminal-native, minimal, no web UI.
@@ -84,6 +85,21 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   // Memory Engine (Phase 4): JSONL stores + failure learning pipeline.
   const memoryStore = new MemoryStore(opts.projectRoot);
   const learner = new FailureLearner(memoryStore);
+
+  // Orchestration (Phase 5): workers spawn only via the budget-enforced
+  // delegate tool; the Manager stays the primary builder.
+  const orchestrator = new Orchestrator({
+    provider,
+    model: config.model.name,
+    config,
+    registry,
+    events,
+    budget,
+    cancellation,
+    ctx,
+    learner,
+  });
+  registry.register(orchestrator.delegateTool());
 
   const manager = new ManagerLoop({
     provider,
