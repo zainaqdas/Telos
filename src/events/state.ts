@@ -1,4 +1,4 @@
-import type { AgentEvent, BudgetSnapshot, RequirementRecord, TeamState } from "./types.ts";
+import type { AgentEvent, BudgetSnapshot, ProposalStatus, RequirementRecord, TeamState } from "./types.ts";
 
 /**
  * Pure reducer: events → TeamState (Part 14). No I/O, no clock reads —
@@ -18,6 +18,7 @@ export function reduce(events: AgentEvent[]): TeamState {
     objections: [],
     blockers: [],
     findings: [],
+    proposals: new Map(),
     skills: new Map(),
     workers: new Map(),
     budget: makeBudget({ tokensUsed: 0, toolCallsUsed: 0, modelCallsUsed: 0, workersSpawned: 0 }, taskStart),
@@ -73,6 +74,15 @@ function apply(state: TeamState, ev: AgentEvent): void {
           req.status = "invalidated";
           for (const e of req.evidence) e.valid = false;
         }
+      }
+      // A correction also invalidates the reasoning built on pre-correction
+      // state (Part 91): active proposals need rework; prior decisions are
+      // superseded because their premise moved.
+      for (const p of state.proposals.values()) {
+        if (p.status === "active") p.status = "needs_rework";
+      }
+      for (const d of state.decisions) {
+        if (d.status === "active") d.status = "superseded";
       }
       break;
     case "requirement_added": {
@@ -151,6 +161,25 @@ function apply(state: TeamState, ev: AgentEvent): void {
     case "blocker":
       state.blockers.push({ id: str(d["id"]), reason: str(d["reason"]), status: "open", t: ev.t });
       break;
+    case "proposal":
+      state.proposals.set(str(d["id"]), {
+        statement: str(d["statement"]),
+        raisedBy: str(d["raised_by"]),
+        status: "active" as ProposalStatus,
+        t: ev.t,
+      });
+      break;
+    case "proposal_invalidated": {
+      const p = state.proposals.get(str(d["id"]));
+      if (!p) break;
+      p.status = str(d["status"]) === "needs_rework" ? "needs_rework" : "invalidated";
+      break;
+    }
+    case "blocker_resolved": {
+      const b = state.blockers.find((bl) => bl.id === str(d["id"]));
+      if (b) b.status = "resolved";
+      break;
+    }
     case "delegation":
     case "worker_started":
       if (ev.kind === "worker_started") {
@@ -185,6 +214,7 @@ function apply(state: TeamState, ev: AgentEvent): void {
     case "failure":
     case "lesson_candidate":
     case "lesson_verified":
+    case "worker_waiting":
       break;
   }
 }

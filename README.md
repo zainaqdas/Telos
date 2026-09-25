@@ -46,7 +46,7 @@ CompletionGate (src/gate)           single completion authority
 EventLog (JSONL) → reducer → TeamState    (authoritative, append-only)
 ```
 
-The Manager is the primary builder: it plans, edits, runs, and verifies. Workers are task-scoped, read-only specialists it can consult through the budget-enforced `delegate` tool — their findings and objections are advisory input, never writes.
+The Manager is the primary builder: it plans, edits, runs, and verifies. Workers are task-scoped, read-only specialists it can consult through the budget-enforced `delegate` tool — their findings, proposals, and blockers are advisory input, never writes. Proposals from workers are first-class: a user correction marks stale proposals `needs_rework`, blockers stay visible until a recorded decision clears them, and while workers run in parallel the Manager's write tools are stripped (single-writer discipline).
 
 ## Highlights
 
@@ -59,7 +59,7 @@ The Manager is the primary builder: it plans, edits, runs, and verifies. Workers
 
 ## Slash commands
 
-`/help` `/status` `/profile` `/diff` `/cancel` `/model` `/exit`
+`/help` `/status` `/profile` `/diff` `/collab` `/cancel` `/correct` `/model` `/exit`
 
 ## Configuration
 

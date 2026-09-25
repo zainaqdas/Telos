@@ -11,6 +11,7 @@ import { makeContext, installSecret } from "../tools/util.ts";
 import { BudgetEnforcer, type BudgetLimits } from "../runtime/usage.ts";
 import { CancellationController } from "../runtime/cancellation.ts";
 import { EventLog } from "../events/log.ts";
+import { reduce } from "../events/state.ts";
 import { CompletionGate } from "../gate/gate.ts";
 import { ManagerLoop } from "../manager/loop.ts";
 import { profileRepository } from "../context/profile.ts";
@@ -106,6 +107,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   });
   registry.register(orchestrator.delegateTool());
   registry.register(orchestrator.continueTool());
+  registry.register(orchestrator.decisionTool());
 
   const manager = new ManagerLoop({
     provider,
@@ -258,6 +260,14 @@ export async function runSession(opts: SessionOpts): Promise<number> {
           await new Promise((r) => setTimeout(r, 200));
         }
         out("[correction received — invalidating conflicting work]");
+        // Correction propagation (Part 92): waiting workers re-evaluate their
+        // report against the correction; their stale proposals go needs_rework.
+        try {
+          const resumed = await orchestrator.propagateCorrection(text);
+          if (resumed.length) out(`[correction propagated to ${resumed.length} waiting worker(s): ${resumed.join(", ")}]`);
+        } catch {
+          /* propagation must never block the correction itself */
+        }
         await runInstruction(text, true);
         return;
       }
@@ -356,7 +366,7 @@ async function handleSlashCommand(
         "/profile         repository profile (languages, commands, instructions)",
         "/skills          list loaded skills (source, checklist, constraints)",
         "/memory          show durable memory (rules, lessons, rejected approaches)",
-        "/diff            git diff of the workspace",
+        "/collab          open proposals, blockers, and unresolved objections",
         "/cancel          cancel the running task",
         "/correct <text>  send a correction (highest priority, invalidates conflicting work)",
         "/model           show configured model (change via config/env)",
@@ -367,12 +377,18 @@ async function handleSlashCommand(
       const u = deps.budget.used;
       const l = deps.budget.limitsValue;
       const waiting = deps.orchestrator.waitingWorkerIds();
+      const state = reduce(deps.events.readAll());
+      const activeProposals = [...state.proposals.values()].filter((p) => p.status === "active").length;
+      const needsRework = [...state.proposals.values()].filter((p) => p.status === "needs_rework").length;
+      const openBlockers = state.blockers.filter((b) => b.status === "open").length;
+      const openObjections = state.objections.filter((o) => !o.resolved).length;
       out([
         `model      ${deps.config.model.provider}/${deps.config.model.name}`,
         `tokens     ${u.tokens} / ${l.maxTotalTokens}`,
         `tool calls ${u.toolCalls} / ${l.maxToolCalls}`,
         `workers    ${u.workersSpawned} / ${l.maxWorkerSpawns} (parallel ${u.runningWorkers}/${l.maxParallelWorkers})`,
         `waiting    ${waiting.length ? waiting.join(", ") : "(none)"}`,
+        `collab     proposals ${activeProposals} active / ${needsRework} needs-rework · blockers ${openBlockers} open · objections ${openObjections} unresolved`,
         `wall time  ${Math.round((Date.now() - u.startedAt) / 1000)}s / ${l.maxWallTimeSeconds}s`,
       ].join("\n"));
       return;
@@ -380,6 +396,20 @@ async function handleSlashCommand(
     case "diff": {
       const res = spawnSync("git", ["--no-pager", "diff", "--stat"], { cwd: deps.projectRoot, encoding: "utf8" });
       out(res.stdout || "(no unstaged changes)");
+      return;
+    }
+    case "collab": {
+      const state = reduce(deps.events.readAll());
+      const proposals = [...state.proposals.entries()];
+      const blockers = state.blockers.filter((b) => b.status === "open");
+      const objections = state.objections.filter((o) => !o.resolved);
+      if (!proposals.length && !blockers.length && !objections.length) {
+        out("(no open proposals, blockers, or objections)");
+        return;
+      }
+      for (const [id, p] of proposals) out(`PROPOSAL ${id} [${p.status}] (${p.raisedBy}): ${p.statement}`);
+      for (const b of blockers) out(`BLOCKER ${b.id}: ${b.reason}`);
+      for (const o of objections) out(`OBJECTION (${o.raisedBy}): ${o.statement}`);
       return;
     }
     case "cancel":

@@ -12,6 +12,8 @@ export type EventKind =
   | "user_correction"
   | "finding"
   | "proposal"
+  | "proposal_invalidated"
+  | "blocker_resolved"
   | "objection"
   | "decision"
   | "delegation"
@@ -93,6 +95,9 @@ export interface TaskMeta {
   endReason?: string;
 }
 
+/** Lifecycle of a worker proposal: corrections force needs_rework (Part 91). */
+export type ProposalStatus = "active" | "invalidated" | "superseded" | "needs_rework";
+
 /** Derived state — a pure projection of the event log (Part 14). */
 export interface TeamState {
   task: TaskMeta;
@@ -102,7 +107,9 @@ export interface TeamState {
   objections: Array<{ id: string; statement: string; raisedBy: string; t: number; resolved: boolean }>;
   blockers: Array<{ id: string; reason: string; status: "open" | "resolved"; t: number }>;
   findings: Array<{ text: string; source: string; t: number }>;
-  /** Activated skills with their checklist requirement ids (Part 36). */
+  /** Worker proposals (Part 91): first-class, status tracks correction invalidation. */
+  proposals: Map<string, { statement: string; raisedBy: string; status: "active" | "invalidated" | "superseded" | "needs_rework"; t: number }>;
+  /** Skill checklist bookkeeping for the gate's audit (Part 36). */
   skills: Map<string, { name: string; source: string; status: "active"; requirementIds: string[]; activatedAt: number }>;
   workers: Map<string, { role: string; status: "running" | "completed" | "failed"; startedAt: number }>;
   budget: BudgetSnapshot;

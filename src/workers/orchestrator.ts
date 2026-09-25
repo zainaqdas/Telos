@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { ToolRegistry, type ToolDefinition } from "../tools/registry.ts";
 import type { BudgetEnforcer } from "../runtime/usage.ts";
 import type { EventLog } from "../events/log.ts";
-import { ROLES, parseWorkerReport, formatReportForManager, type WorkerRole, type WorkerReport } from "./roles.ts";
+import { ROLES, parseWorkerReport, formatReportForManager, emptyReport, evaluateObjection, type WorkerRole, type WorkerReport } from "./roles.ts";
 import { ManagerLoop } from "../manager/loop.ts";
 import type { Provider } from "../providers/types.ts";
 import type { ToolExecContext } from "../tools/registry.ts";
@@ -14,8 +14,15 @@ import type { FailureLearner } from "../memory/pipeline.ts";
  * Orchestrator (Part 90): task decomposition happens in the Manager's model
  * turn; this component enforces the runtime side — worker budgets, scoped
  * toolsets, event bookkeeping, and reconciliation of worker output into
- * findings/objections. The Manager remains the primary builder: workers are
- * read-only (QA read-mostly) and every report is advisory input, never writes.
+ * findings/objections/proposals/blockers. The Manager remains the primary
+ * builder: workers are read-only (QA read-mostly) and every report is advisory
+ * input, never writes.
+ *
+ * Collaboration (Part 91–93): worker proposals are first-class events that a
+ * user correction forces into needs_rework; blockers stay visible until a
+ * decision resolves them; objections go through a deterministic debate before
+ * being dropped; and while parallel workers run, write tools are stripped from
+ * the Manager's own registry (single-writer discipline, defense in depth).
  */
 
 export interface OrchestratorDeps {
@@ -60,10 +67,19 @@ interface WorkerSession {
 
 const VALID_ROLES = new Set(Object.keys(ROLES));
 
+/** Write-capable tools stripped from the Manager's registry while workers run in parallel. */
+const WRITE_TOOLS = new Set(["write_file", "edit_file"]);
+
 export class Orchestrator {
   private workerSeq = 0;
   /** Task-scoped worker sessions (multi-cycle resumability, Part 11). */
   private readonly sessions = new Map<string, WorkerSession>();
+  /** Monotonic id counters (proposals and blockers number independently). */
+  private proposalSeq = 0;
+  private blockerSeq = 0;
+  private decisionSeq = 0;
+  /** Objections already classified by the debate (once per task). */
+  private readonly debatedObjections = new Set<string>();
   private readonly deps: OrchestratorDeps;
 
   constructor(deps: OrchestratorDeps) {
@@ -89,6 +105,14 @@ export class Orchestrator {
     if (!workerId) return { ok: false, error: "worker_id is required (from the original delegate result)" };
     if (!update) return { ok: false, error: "update is required — tell the worker what changed since it went waiting" };
     return { ok: true, workerId, update };
+  }
+
+  /** Validate decision tool call arguments. */
+  parseDecision(args: Record<string, unknown>): { ok: true; statement: string; reason?: string } | { ok: false; error: string } {
+    const statement = typeof args["statement"] === "string" ? args["statement"].trim() : "";
+    const reason = typeof args["reason"] === "string" ? args["reason"].trim() : undefined;
+    if (!statement) return { ok: false, error: "statement is required — state the resolved decision (e.g. how a blocker was cleared or an objection was settled)" };
+    return { ok: true, statement, reason: reason || undefined };
   }
 
   /** Continue tool definition for resuming waiting workers. */
@@ -149,6 +173,41 @@ export class Orchestrator {
   }
 
   /**
+   * Decision tool (Part 93): resolves a blocker, upholds or overrides an
+   * objection debate, or adopts a proposal. Recorded as a first-class
+   * `decision` event; open blockers referenced by id are marked resolved.
+   */
+  decisionTool(): ToolDefinition {
+    return {
+      name: "decision",
+      description:
+        "Record a resolved decision: a blocker you cleared, an objection debate you settled, or a worker proposal you adopted/rejected. State the resolution and why. Open blockers referenced by id (e.g. 'resolves b-3') are marked resolved automatically.",
+      permission: "read",
+      mutative: false,
+      risk: "low",
+      parameters: {
+        type: "object",
+        properties: {
+          statement: { type: "string", description: "The resolved decision (what was decided and, if applicable, which blocker id it resolves)" },
+          reason: { type: "string", description: "Why — evidence, tradeoff, or the objection debate outcome" },
+        },
+        required: ["statement"],
+        additionalProperties: false,
+      },
+      execute: async (args, _ctx) => {
+        void _ctx;
+        const parsed = this.parseDecision(args);
+        if (!parsed.ok) return { ok: false, output: `decision: ${parsed.error}`, errorCategory: "bad_args" };
+        const blockersResolved = this.recordDecision(parsed.statement, parsed.reason);
+        return {
+          ok: true,
+          output: blockersResolved > 0 ? `decision recorded; ${blockersResolved} blocker(s) marked resolved` : "decision recorded",
+        };
+      },
+    };
+  }
+
+  /**
    * Run one delegation: budget-gated spawn → scoped worker loop → report.
    * If the worker ends with a WAITING line (needs something it cannot get —
    * e.g. a pending edit to review), the session is kept and resumable via
@@ -172,9 +231,14 @@ export class Orchestrator {
       question: req.question,
       context: req.context,
       cycles: 0,
-      lastReport: { findings: [], risks: [], recommendations: [], objections: [], raw: "" },
+      lastReport: emptyReport(),
     };
     this.sessions.set(workerId, session);
+
+    // Parallel-write discipline (Part 91, defense in depth): while at least
+    // one worker is running, the Manager's registry loses write tools. Role
+    // allowlists remain authoritative for workers themselves.
+    const releaseWriteStrip = this.maybeStripWriteTools();
 
     try {
       const result = await this.runCycle(session, req.context);
@@ -183,6 +247,8 @@ export class Orchestrator {
       this.deps.events.append("worker_completed", { id: workerId, ok: false });
       this.sessions.delete(workerId);
       return this.failed(`worker ${workerId} (${req.role}) failed: ${(err as Error).message}`);
+    } finally {
+      releaseWriteStrip();
     }
   }
 
@@ -211,6 +277,130 @@ export class Orchestrator {
     return [...this.sessions.entries()].filter(([, s]) => s.waitingFor).map(([id]) => id);
   }
 
+  /**
+   * Correction propagation (Part 92): a user correction invalidates the
+   * reasoning built on pre-correction state. Active worker proposals become
+   * needs_rework, open blockers stay open, and every waiting worker is
+   * resumed with the correction so it can re-evaluate its report against the
+   * new state. Returns the resumed worker ids (empty when none were waiting).
+   */
+  async propagateCorrection(correction: string): Promise<string[]> {
+    // Objection debate (Part 93): every worker objection raised before the
+    // correction is classified against it exactly once. Objections that
+    // survive get guidance the Manager must follow (decision tool or user
+    // escalation) — it cannot silently proceed past a risk objection.
+    const prior = this.deps.events.readAll();
+    for (const ev of prior) {
+      if (ev.kind !== "objection") continue;
+      const statement = String(ev.data["statement"] ?? "");
+      if (!statement || this.debatedObjections.has(statement)) continue;
+      this.debatedObjections.add(statement);
+      const debate = this.debateObjection(statement, correction);
+      this.deps.events.append("task_updated", { notice: debate.guidance.slice(0, 400) });
+    }
+    const waiting = [...this.sessions.entries()].filter(([, s]) => s.waitingFor);
+    const resumed: string[] = [];
+    for (const [id, session] of waiting) {
+      this.deps.events.append("worker_started", { id, role: session.role, resumed: true, cycle: session.cycles + 1, reason: "user_correction" });
+      try {
+        await this.runCycle(session, `USER CORRECTION — the user corrected course: ${correction}\nRe-evaluate your prior report against this correction. State what changes, what still holds, and end with WAITING: <need> if you now need something else.`);
+        resumed.push(id);
+      } catch {
+        // A worker that fails during propagation is simply no longer waiting;
+        // the correction itself has already been recorded at the task level.
+        this.deps.events.append("worker_completed", { id, ok: false });
+        this.sessions.delete(id);
+      }
+    }
+    return resumed;
+  }
+
+  /**
+   * Objection debate (Part 93): classify a worker objection against the
+   * latest user instruction/correction. Returns the debate verdict and, when
+   * the objection survives, appends guidance the Manager must follow.
+   */
+  debateObjection(objection: string, latestUserText: string): { verdict: "upheld" | "dismissed" | "needs_decision"; guidance: string } {
+    const debate = evaluateObjection(objection, latestUserText);
+    const prefix = `OBJECTION DEBATE (${debate.verdict}): ${debate.rationale}`;
+    if (debate.verdict === "needs_decision") {
+      return {
+        verdict: debate.verdict,
+        guidance: `${prefix}. You must either record a decision via the decision tool explaining why it is safe to proceed, or surface the objection to the user. Do not silently proceed.`,
+      };
+    }
+    if (debate.verdict === "upheld") {
+      return { verdict: debate.verdict, guidance: `${prefix}. The objection stands — incorporate it before continuing.` };
+    }
+    return { verdict: debate.verdict, guidance: `${prefix}.` };
+  }
+
+  /**
+   * Record a decision event; resolves any open blocker whose id appears in
+   * the statement (Part 93: decisions are the only thing that clears a
+   * blocker). Returns how many blockers were resolved.
+   */
+  recordDecision(statement: string, reason?: string): number {
+    const id = `d-${++this.decisionSeq}`;
+    this.deps.events.append("decision", { id, statement: statement.slice(0, 400), reason: reason?.slice(0, 400) });
+    const text = statement.toLowerCase();
+    const events = this.deps.events.readAll();
+    const blockerIds = new Set(events.filter((e) => e.kind === "blocker").map((e) => String(e.data["id"] ?? "")));
+    const resolvedIds = new Set(events.filter((e) => e.kind === "blocker_resolved").map((e) => String(e.data["id"] ?? "")));
+    let resolved = 0;
+    for (const blockerId of blockerIds) {
+      if (!blockerId || resolvedIds.has(blockerId)) continue;
+      // Word-boundary match so 'b-1' does not accidentally resolve 'b-10'.
+      if (!new RegExp(`\\b${blockerId}\\b`).test(text)) continue;
+      this.deps.events.append("blocker_resolved", { id: blockerId, by: id });
+      resolved += 1;
+    }
+    return resolved;
+  }
+
+  /**
+   * While workers are running, remove write tools from the Manager's registry
+   * (single-writer rule enforced at the registry layer). Returns a release
+   * function restoring them; the strip is refcounted for parallel delegates.
+   */
+  private maybeStripWriteTools(): () => void {
+    // Refcounted: N concurrent delegates each strip once; the registry is
+    // restored only when the LAST one releases. New registrations while
+    // stripped are re-deferred so nothing re-appears mid-window.
+    const registry = this.deps.registry;
+    const key = "__writeTools";
+    const entry = ((registry as unknown as Record<string, unknown>)[key] ?? { count: 0, tools: [] as ToolDefinition[] }) as { count: number; tools: ToolDefinition[] };
+    if (entry.count === 0) {
+      for (const name of WRITE_TOOLS) {
+        const tool = registry.get(name);
+        if (tool) {
+          entry.tools.push(tool);
+          registry.remove(name);
+        }
+      }
+      if (entry.tools.length > 0) {
+        this.deps.events.append("task_updated", { notice: `parallel_write_discipline: write tools stripped while workers run (${entry.tools.map((t) => t.name).join(", ")})` });
+      }
+    }
+    entry.count += 1;
+    (registry as unknown as Record<string, unknown>)[key] = entry;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      entry.count -= 1;
+      if (entry.count === 0) {
+        // remove-then-register: a mid-window re-registration must not make
+        // the restore throw (duplicate tool) or shadow the original.
+        for (const tool of entry.tools) {
+          registry.remove(tool.name);
+          registry.register(tool);
+        }
+        (registry as unknown as Record<string, unknown>)[key] = undefined;
+      }
+    };
+  }
+
   /** One investigation cycle: scoped loop run → report parse → reconcile. */
   private async runCycle(session: WorkerSession, extraContext?: string, isRetry = false): Promise<DelegationResult> {
     const scoped = this.scopedRegistry(ROLES[session.role].allowedTools);
@@ -230,6 +420,7 @@ export class Orchestrator {
         text:
           `You are ${session.role}, a task-scoped specialist worker. ${roleSpec.mission}\n\n` +
           `OUTPUT CONTRACT — use EXACTLY these section headers, each on its own line:\n${roleSpec.outputContract}\n` +
+          `Use PROPOSAL: for a concrete plan or change you recommend the Manager adopt, and BLOCKER: for something you cannot resolve that must stay visible until a decision clears it.\n` +
           `If you cannot complete your mission because you are waiting on something (e.g. an edit not yet applied, missing test run), end your reply with a line 'WAITING: <what you need>' instead of speculating.\n\n` +
           `You are read-only in this workspace${session.role === "qa" ? " (you may run tests/builds but must not modify source)" : ""}. The Manager integrates your report; do not edit production files.\n\n` +
           `QUESTION FROM MANAGER: ${session.question}${session.context ? `\n\nCONTEXT: ${session.context}` : ""}${extraContext ? `\n\nUPDATE FROM MANAGER: ${extraContext}` : ""}\n\n` +
@@ -247,7 +438,7 @@ export class Orchestrator {
     // Contract enforcement: if the final message carried no structured
     // sections at all, spend ONE retry asking for the exact headers (the
     // content is usually good — only the shape is missing).
-    const structured = report.findings.length > 0 || report.risks.length > 0 || report.recommendations.length > 0 || report.objections.length > 0 || report.verdict !== undefined || report.tested!.length > 0;
+    const structured = report.findings.length > 0 || report.risks.length > 0 || report.recommendations.length > 0 || report.objections.length > 0 || report.verdict !== undefined || report.tested!.length > 0 || report.proposals.length > 0 || report.blockers.length > 0;
     if (!structured && !isRetry && !result.assistantText.includes("WAITING:")) {
       this.deps.events.append("failure", { source: "worker_contract", message: `${session.role} reply lacked required section headers; retrying once with format reminder` });
       return this.runCycle(session, extraContext, true);
@@ -294,9 +485,9 @@ export class Orchestrator {
     return results;
   }
 
-  /** Record findings/objections as first-class events (Parts 12–13) and
-   *  persist them to memory so future sessions retrieve them without
-   *  re-reading raw event logs. */
+  /** Record findings/objections/proposals/blockers as first-class events
+   *  (Parts 12–13, 91) and persist them to memory so future sessions retrieve
+   *  them without re-reading raw event logs. */
   private reconcile(workerId: string, role: WorkerRole, report: WorkerReport): void {
     for (const f of report.findings.slice(0, 5)) {
       const text = f.claim.slice(0, 240);
@@ -320,6 +511,30 @@ export class Orchestrator {
         verified: true,
       });
     }
+    for (const p of report.proposals.slice(0, 3)) {
+      const id = `p-${++this.proposalSeq}`;
+      const statement = p.statement.slice(0, 300);
+      this.deps.events.append("proposal", { id, statement, raised_by: `${role}:${workerId}`, rationale: p.rationale?.slice(0, 300) });
+      this.deps.learner?.store.add({
+        type: "fact",
+        key: `proposal:${statement.slice(0, 80)}`,
+        statement: `proposal (${role}): ${statement}`,
+        source: `${role}:${workerId}`,
+        verified: false,
+      });
+    }
+    for (const b of report.blockers.slice(0, 3)) {
+      const id = `b-${++this.blockerSeq}`;
+      const reason = b.slice(0, 300);
+      this.deps.events.append("blocker", { id, reason, raised_by: `${role}:${workerId}` });
+      this.deps.learner?.store.add({
+        type: "fact",
+        key: `blocker:${reason.slice(0, 80)}`,
+        statement: `blocker (${role}): ${reason} — resolve via a recorded decision`,
+        source: `${role}:${workerId}`,
+        verified: true,
+      });
+    }
   }
 
   /** Build a registry view containing only the role's allowed tools. */
@@ -333,6 +548,6 @@ export class Orchestrator {
   }
 
   private failed(message: string): DelegationResult {
-    return { workerId: "none", role: "explorer", report: { findings: [], risks: [], recommendations: [], objections: [], raw: message }, tokens: 0, toolCalls: 0, error: message };
+    return { workerId: "none", role: "explorer", report: emptyReport(message), tokens: 0, toolCalls: 0, error: message };
   }
 }

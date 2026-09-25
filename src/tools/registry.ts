@@ -49,6 +49,12 @@ export class ToolRegistry {
     return this.tools.get(name);
   }
 
+  /** Remove a tool (parallel-write discipline: write tools are stripped from
+   *  the Manager's registry while workers run; restore re-registers them). */
+  remove(name: string): void {
+    this.tools.delete(name);
+  }
+
   names(): string[] {
     return [...this.tools.keys()].sort();
   }

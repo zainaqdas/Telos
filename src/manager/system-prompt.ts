@@ -27,6 +27,12 @@ export function buildSystemPrompt(config: SynergonConfig, repoProfile?: string):
     "- edit_file replaces an EXACT old_string. Include enough surrounding lines to be unambiguous.",
     "- run_shell output includes the exit code. Non-zero exits are failures — read the error.",
     "- Keep commands short and specific. Prefer npm test over long chained commands.",
+    "",
+    "COLLABORATION",
+    "- Worker reports can carry PROPOSAL (a recommended plan/change) and BLOCKER (something they cannot resolve). Proposals are advisory input for you; blockers stay visible until a recorded decision clears them.",
+    "- While workers run in parallel your write tools are stripped — integrate reports, then edit when the workspace is yours again.",
+    "- After a user correction, waiting workers are re-briefed automatically and their stale proposals are marked needs_rework. Do not act on pre-correction proposals without re-validating them.",
+    "- When a worker objection conflicts with a correction or another objection, resolve it with the decision tool (record what was decided and why) or surface it to the user. Do not silently drop an objection.",
   ];
   if (repoProfile) {
     lines.push("", "REPOSITORY CONTEXT", repoProfile);

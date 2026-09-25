@@ -1,5 +1,27 @@
 # Synergon — Phase Reports
 
+## Phase 7 — Collaboration
+
+**Implemented**
+
+- Proposals and blockers as first-class worker output (Parts 13, 91): the parser extracts `PROPOSAL:`/`BLOCKER:` sections, each header occurrence starting a new item; `formatReportForManager` renders them for the Manager; reconciliation appends `proposal`/`blocker` events (ids `p-N`/`b-N`, numbered independently) and persists them to memory so future sessions retrieve them.
+- TeamState gained a proposals map with lifecycle `active | invalidated | superseded | needs_rework`. A `user_correction` forces every active proposal to `needs_rework` and supersedes active decisions — the reasoning built on pre-correction state cannot silently survive (Part 92). `proposal_invalidated` and `blocker_resolved` are reducer-handled.
+- Blocker resolution flows only through decisions: the new `decision` tool (registered in the session alongside delegate/continue_worker) records a `decision` event and resolves any open blocker whose id appears in the statement (word-boundary match, idempotent — a second decision naming the same blocker resolves nothing).
+- Objection debate (Part 93): `evaluateObjection` classifies a worker objection against a correction deterministically — *upheld* when the correction addresses the objection's subject, *needs_decision* when it flags a concrete risk (regression, data loss, security, races, migrations…), *dismissed* when it restates mere preference. Corrections trigger the debate once per prior objection (`debatedObjections` set), and surviving objections produce a transcript notice the Manager must act on: record a decision or escalate to the user — never silently proceed.
+- Correction propagation (Part 92): `propagateCorrection` resumes every waiting worker with a `USER CORRECTION` re-brief (`worker_started(resumed:true, reason:user_correction)`), so stale waiting reports are re-evaluated instead of trusted; wired into `/correct`.
+- Parallel-write discipline (Part 91, defense in depth): while any worker runs, `write_file`/`edit_file` are stripped from the Manager's registry and restored when the last delegation releases — refcounted, with re-deferral of re-registrations mid-window. Role allowlists stay the primary wall; the strip protects the single-writer rule during parallel investigation.
+- Visibility: `/status` gained a `collab` line (proposals active/needs-rework, blockers open, objections unresolved); new `/collab` slash command lists them with ids and raisers; Manager system prompt gained a COLLABORATION section (integrate-then-edit, needs_rework semantics, objection handling).
+
+**Tested** — 15 new tests in `test/collaboration.test.ts`: parser PROPOSAL/BLOCKER extraction and round-trip rendering; proposals-only reply counts as structured (no spurious format retry); proposal/blocker reconciliation into events, state, and memory; correction → proposals `needs_rework` + decisions superseded; `proposal_invalidated`/`blocker_resolved` reduction; decision resolves exactly the named blocker (idempotent, `b-1` does not match `b-10`); decision-tool end-to-end; all three debate verdicts; once-per-objection debate; correction propagation into a waiting worker (re-brief + resume marker + completion); propagation no-op; write-strip observed mid-run from the provider and restored-and-functional afterwards; parallel delegations keep tools stripped until the last worker finishes.
+
+**Verified** — `npx tsc --noEmit` clean; full suite 83/83 passing (68 pre-existing + 15 new).
+
+**Failed / learned** — the first parser refactor merged consecutive same-header sections into one item (two `BLOCKER:` lines parsed as one blocker — caught by asserting event data, not just counts); sharing one id counter across proposals/blockers/decisions shifted blocker ids and broke resolution-by-id (each artifact class numbers independently now); the first strip implementation restored tools when the *first* worker finished while others still ran (refcounting fixed it); reducer bug caught by keeping the skills map: an in-flight edit had dropped it from TeamState.
+
+**Remaining** — proposal/objection surfaces in the completion gate's BLOCKED reasoning, cross-task proposal memory, debate over multiple concurrent objections.
+
+**Architecture changes** — blockers now have a single resolution path (decisions), and corrections invalidate derived reasoning (proposals, decisions), not just requirements. Both are reducer-level invariants: the Manager cannot opt out.
+
 ## Phase 6 — Worker Polish (with stream-timeout hardening)
 
 **Implemented**
