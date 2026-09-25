@@ -109,6 +109,7 @@ export class CompletionGate {
     // needs_decision block until a decision resolves them — the Manager
     // cannot complete a task past an unresolved disagreement.
     const openBlockers = state.blockers.filter((b) => b.status === "open");
+    const waivedBlockers = state.blockers.filter((b) => b.status === "waived");
     const undecidedObjections = state.objections.filter((o) => !o.resolved && o.debate?.verdict === "needs_decision");
 
     let verdict: GateVerdict;
@@ -125,11 +126,15 @@ export class CompletionGate {
     if (unverifiedWrites) parts.push("workspace was modified but nothing was run to verify it");
     if (changeRequestedButNotMade) parts.push("instruction requested changes but no workspace change or verification occurred");
     for (const b of openBlockers) parts.push(`open blocker ${b.id}: ${clip(b.reason)} — resolve via the decision tool`);
+    for (const b of waivedBlockers) parts.push(`waived blocker ${b.id}: ${clip(b.reason)} (user waived via /waive)`);
     for (const o of undecidedObjections) parts.push(`objection ${o.id || "(legacy)"} awaits a decision: ${clip(o.statement)}`);
     for (const s of skillAudit) {
       if (s.pending.length) parts.push(`skill ${s.skill} pending: ${s.pending.join(", ")}`);
     }
-    const summary = verdict === "COMPLETE" ? `all ${satisfied.length} required conditions satisfied` : parts.join("; ") || "no requirements registered";
+    let summary = verdict === "COMPLETE" ? `all ${satisfied.length} required conditions satisfied` : parts.join("; ") || "no requirements registered";
+    if (verdict === "COMPLETE" && waivedBlockers.length > 0) {
+      summary += `; ${waivedBlockers.length} blocker(s) waived by user: ${waivedBlockers.map((b) => b.id).join(", ")}`;
+    }
 
     return { verdict, satisfied, unsatisfied, blocked, invalidated, summary };
   }

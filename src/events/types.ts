@@ -32,6 +32,7 @@ export type EventKind =
   | "lesson_candidate"
   | "lesson_verified"
   | "blocker"
+  | "blocker_waived"
   | "requirement_added"
   | "requirement_satisfied"
   | "requirement_invalidated"
@@ -107,7 +108,7 @@ export interface TeamState {
   requirements: Map<string, RequirementRecord>;
   decisions: Array<{ id: string; statement: string; reason?: string; status: "active" | "superseded"; t: number }>;
   objections: Array<{ id: string; statement: string; raisedBy: string; t: number; resolved: boolean; debate?: { verdict: "upheld" | "dismissed" | "needs_decision"; rationale: string } }>;
-  blockers: Array<{ id: string; reason: string; status: "open" | "resolved"; t: number }>;
+  blockers: Array<{ id: string; reason: string; status: "open" | "resolved" | "waived"; t: number }>;
   findings: Array<{ text: string; source: string; t: number }>;
   /** Worker proposals (Part 91): first-class, status tracks correction invalidation. */
   proposals: Map<string, { statement: string; raisedBy: string; status: "active" | "invalidated" | "superseded" | "needs_rework"; t: number }>;

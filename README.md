@@ -79,6 +79,14 @@ max_wall_time_seconds = 900
 
 [security]
 confirm_destructive = true
+
+# [[tools.external]]
+# name = "deploy_preview"        # exposed as a first-class tool to the Manager
+# command = "bin/deploy-preview" # single invocation; args appended as quoted literals
+# [[tools.external.params]]
+# key = "env"
+# type = "string"
+# required = true
 ```
 
 API keys are read from the environment only — never written to prompts, logs, event history, or Git.

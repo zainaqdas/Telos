@@ -206,6 +206,13 @@ function apply(state: TeamState, ev: AgentEvent): void {
       if (b) b.status = "resolved";
       break;
     }
+    case "blocker_waived": {
+      // A USER decision (Part 95): the /waive slash command is the only writer.
+      // Waived blockers stop blocking the gate but stay visible as waived.
+      const b = state.blockers.find((bl) => bl.id === str(d["id"]));
+      if (b) b.status = "waived";
+      break;
+    }
     case "delegation":
     case "worker_started":
       if (ev.kind === "worker_started") {

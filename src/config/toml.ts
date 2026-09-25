@@ -23,11 +23,13 @@ export function parseToml(text: string): TomlTable {
 
     const arraySection = ARRAY_SECTION_RE.exec(line);
     if (arraySection) {
-      // [[path]] — append a fresh table to the array at `path`. Intermediate
-      // segments resolve to the most recent table when they are arrays, so
-      // [[skill.checklist]] attaches to the last [[skill]] entry.
+      // [[a.b.c]] — append a fresh table to the array at `path`, resolved from
+      // the ROOT (like [a.b.c] sections). Intermediate segments that are
+      // arrays resolve to their most recent entry, so [[skill.checklist]]
+      // attaches to the last [[skill]] entry and repeated [[a.b]] entries
+      // each become siblings — never nested inside the previous one.
       const parts = arraySection[1]!.split(".");
-      let cursor: TomlTable = current;
+      let cursor: TomlTable = root;
       for (let i = 0; i < parts.length - 1; i++) {
         const key = parts[i]!;
         const next = cursor[key];

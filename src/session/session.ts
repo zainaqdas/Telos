@@ -21,6 +21,7 @@ import { SkillRouter } from "../skills/router.ts";
 import { MemoryStore } from "../memory/store.ts";
 import { FailureLearner } from "../memory/pipeline.ts";
 import { Orchestrator } from "../workers/orchestrator.ts";
+import { loadExternalToolSpecs, registerExternalTools } from "../tools/external.ts";
 
 /**
  * Interactive session (Part 60/62): terminal-native, minimal, no web UI.
@@ -108,6 +109,13 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   registry.register(orchestrator.delegateTool());
   registry.register(orchestrator.continueTool());
   registry.register(orchestrator.decisionTool());
+
+  // User-declared external tools (Part 94): compiled into the same registry
+  // shape; collisions never shadow builtins, bad declarations never break the
+  // session.
+  const external = registerExternalTools(registry, loadExternalToolSpecs(opts.projectRoot));
+  for (const name of external.registered) out(`  ⚙ external tool registered: ${name}`);
+  for (const s of external.skipped) out(`  ⚙ external tool skipped: ${s.reason}`);
 
   const manager = new ManagerLoop({
     provider,
@@ -367,6 +375,7 @@ async function handleSlashCommand(
         "/skills          list loaded skills (source, checklist, constraints)",
         "/memory          show durable memory (rules, lessons, rejected approaches)",
         "/collab          open proposals, blockers, and unresolved objections",
+        "/waive <id>      waive an open blocker (user-only; stays visible as waived)",
         "/cancel          cancel the running task",
         "/correct <text>  send a correction (highest priority, invalidates conflicting work)",
         "/model           show configured model (change via config/env)",
@@ -401,15 +410,30 @@ async function handleSlashCommand(
     case "collab": {
       const state = reduce(deps.events.readAll());
       const proposals = [...state.proposals.entries()];
-      const blockers = state.blockers.filter((b) => b.status === "open");
+      const blockers = state.blockers.filter((b) => b.status === "open" || b.status === "waived");
       const objections = state.objections.filter((o) => !o.resolved);
       if (!proposals.length && !blockers.length && !objections.length) {
         out("(no open proposals, blockers, or objections)");
         return;
       }
       for (const [id, p] of proposals) out(`PROPOSAL ${id} [${p.status}] (${p.raisedBy}): ${p.statement}`);
-      for (const b of blockers) out(`BLOCKER ${b.id}: ${b.reason}`);
+      for (const b of blockers) out(`BLOCKER ${b.id} [${b.status}]: ${b.reason}`);
       for (const o of objections) out(`OBJECTION ${o.id || "(legacy)"}${o.debate ? ` [debate: ${o.debate.verdict}]` : ""} (${o.raisedBy}): ${o.statement}`);
+      return;
+    }
+    case "waive": {
+      // User-only waiver (Part 95): no model-facing tool exists for this — a
+      // waiver is a human decision, recorded as a blocker_waived event.
+      const id = args[0] ?? "";
+      const state = reduce(deps.events.readAll());
+      const blocker = state.blockers.find((b) => b.id === id && b.status === "open");
+      if (!blocker) {
+        const open = state.blockers.filter((b) => b.status === "open").map((b) => b.id);
+        out(`usage: /waive <blocker-id> — open blockers: ${open.join(", ") || "(none)"}`);
+        return;
+      }
+      deps.events.append("blocker_waived", { id: blocker.id, reason: args.slice(1).join(" ") || "user waived via /waive" });
+      out(`[blocker ${blocker.id} waived — stays visible as waived; gate no longer blocked by it]`);
       return;
     }
     case "cancel":
