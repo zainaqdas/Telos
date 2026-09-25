@@ -145,7 +145,10 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     if (isRawSupported) stdin.setRawMode(false);
     stdin.removeListener("data", onKeypress);
     cancellation.cancel("session shutdown");
-    events.append("task_cancelled", { reason: "session ended" });
+    // Only record cancellation if the task did not already complete —
+    // a completed task must not also be marked cancelled in the log.
+    const alreadyCompleted = events.readAll().some((e) => e.kind === "task_completed");
+    if (!alreadyCompleted) events.append("task_cancelled", { reason: "session ended" });
     out(`\nevent log: ${events.file}`);
     process.exit(code);
   };
