@@ -39,7 +39,12 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   const apiKey = resolveApiKey(config.model.apiKeyEnv);
   installSecret(apiKey);
-  const provider = createProvider({ provider: config.model.provider, apiKey, baseUrl: config.model.baseUrl });
+  const provider = createProvider({
+    provider: config.model.provider,
+    apiKey,
+    baseUrl: config.model.baseUrl,
+    streamTimeoutSeconds: config.runtime.streamTimeoutSeconds,
+  });
 
   const registry = new ToolRegistry();
   registerFilesystemTools(registry);

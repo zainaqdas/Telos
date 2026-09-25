@@ -13,17 +13,18 @@ import {
  * phases' task loop. Adding a provider = implementing the interface (Part 53).
  */
 
-export function createProvider(opts: { provider: string; apiKey?: string; baseUrl: string }): Provider {
+export function createProvider(opts: { provider: string; apiKey?: string; baseUrl: string; streamTimeoutSeconds?: number }): Provider {
   const apiKey = opts.apiKey ?? "";
+  const t = opts.streamTimeoutSeconds ?? 120;
   switch (opts.provider) {
     case "openai":
-      return new OpenAICompatibleProvider(apiKey, opts.baseUrl || "https://api.openai.com/v1");
+      return new OpenAICompatibleProvider(apiKey, opts.baseUrl || "https://api.openai.com/v1", t);
     case "openrouter":
-      return new OpenAICompatibleProvider(apiKey, opts.baseUrl || "https://openrouter.ai/api/v1");
+      return new OpenAICompatibleProvider(apiKey, opts.baseUrl || "https://openrouter.ai/api/v1", t);
     case "ollama":
-      return new OpenAICompatibleProvider(apiKey, opts.baseUrl || "http://localhost:11434/v1");
+      return new OpenAICompatibleProvider(apiKey, opts.baseUrl || "http://localhost:11434/v1", t);
     case "openai-compatible":
-      return new OpenAICompatibleProvider(apiKey, opts.baseUrl);
+      return new OpenAICompatibleProvider(apiKey, opts.baseUrl, t);
     case "anthropic":
       // Anthropic's public API is not OpenAI-shaped; Phase 9 adds a native path.
       throw new ProviderError("anthropic native provider lands in Phase 9; use an openai-compatible endpoint for now");

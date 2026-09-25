@@ -69,6 +69,7 @@ export class ManagerLoop {
   private readonly deps: ManagerDeps;
   private usage: Usage = emptyUsage();
   private busy = false;
+  private streamRetries = 0;
   private readonly isWorker: boolean;
   private readonly rejectionHits = new Set<string>();
 
@@ -181,8 +182,16 @@ export class ManagerLoop {
           return this.finish("cancelled", assistantText);
         }
         if (err instanceof ProviderError && err.retryable) {
-          await sleep(500); // basic error recovery: single retry, backoff
-          continue;
+          // Bounded recovery (Part 86): retryable stream/HTTP failures retry
+          // up to maxStreamAttempts with backoff, then fail cleanly.
+          if (this.streamRetries < this.deps.config.runtime.maxStreamAttempts) {
+            this.streamRetries += 1;
+            await sleep(500 * this.streamRetries);
+            continue;
+          }
+          const message = `provider failed after ${this.streamRetries} retry attempt(s): ${(err as Error).message}`;
+          this.deps.events.append("failure", { source: "provider", message });
+          return { ...this.finish("provider_error", assistantText), detail: message };
         }
         this.deps.events.append("failure", { source: "provider", message: (err as Error).message });
         return { ...this.finish("provider_error", assistantText), detail: (err as Error).message };

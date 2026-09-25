@@ -16,8 +16,11 @@ export class OpenAICompatibleProvider implements Provider {
   readonly name = "openai-compatible";
   private readonly apiKey: string;
   private readonly baseUrl: string;
+  /** Seconds of stream inactivity before aborting (0 disables). */
+  private readonly streamTimeoutSeconds: number;
 
-  constructor(apiKey: string, baseUrl: string) {
+  constructor(apiKey: string, baseUrl: string, streamTimeoutSeconds = 120) {
+    this.streamTimeoutSeconds = streamTimeoutSeconds;
     this.apiKey = apiKey;
     this.baseUrl = baseUrl;
   }
@@ -55,76 +58,120 @@ export class OpenAICompatibleProvider implements Provider {
       throw new ProviderError(`provider HTTP ${res.status}: ${text.slice(0, 300)}`, res.status, retryable);
     }
 
-    // Assemble streamed tool calls keyed by index.
-    const pending = new Map<number, { id: string; name: string; args: string }>();
-    let finished = false;
-
-    for await (const payload of sseEvents(res.body, req.signal)) {
-      if (payload === "[DONE]") {
-        finished = true;
-        break;
-      }
-      let chunk: Record<string, unknown>;
-      try {
-        chunk = JSON.parse(payload) as Record<string, unknown>;
-      } catch {
-        continue; // tolerate keepalives/fragmented lines
-      }
-      const choices = Array.isArray(chunk["choices"]) ? (chunk["choices"] as Array<Record<string, unknown>>) : [];
-      const choice = choices[0];
-      if (choice) {
-        const delta = (choice["delta"] ?? {}) as Record<string, unknown>;
-        const content = delta["content"];
-        if (typeof content === "string" && content.length > 0) {
-          yield { type: "text_delta", text: content };
+    // Inactivity watchdog: if no chunk arrives for streamTimeoutSeconds,
+    // abort and surface a retryable timeout instead of hanging the session.
+    let watchdog: ReturnType<typeof setTimeout> | null = null;
+    let sawAnyChunk = false;
+    const armWatchdog = (): void => {
+      if (this.streamTimeoutSeconds <= 0) return;
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        try {
+          controller.abort();
+        } catch {
+          /* already aborted */
         }
-        const toolChunks = delta["tool_calls"];
-        if (Array.isArray(toolChunks)) {
-          for (const [i, raw] of toolChunks.entries()) {
-            const tc = raw as Record<string, unknown>;
-            const idx = typeof tc["index"] === "number" ? tc["index"] : i;
-            const slot = pending.get(idx) ?? { id: "", name: "", args: "" };
-            if (typeof tc["id"] === "string") slot.id = tc["id"];
-            if (typeof tc["function"] === "object" && tc["function"] !== null) {
-              const fn = tc["function"] as Record<string, unknown>;
-              if (typeof fn["name"] === "string") slot.name += fn["name"];
-              if (typeof fn["arguments"] === "string") slot.args += fn["arguments"];
-            }
-            pending.set(idx, slot);
-          }
-        }
-        const finish = choice["finish_reason"];
-        if (typeof finish === "string" && finish.length > 0) {
-          for (const slot of pending.values()) {
-            if (slot.name) {
-              const call: ToolCall = { id: slot.id || `call_${slot.name}`, name: slot.name, argumentsJson: slot.args };
-              yield { type: "tool_call_delta", toolCall: call };
-            }
-          }
-          pending.clear();
-          yield { type: "finish", stopReason: finish };
-        }
-      }
-      const usage = chunk["usage"];
-      if (usage && typeof usage === "object") {
-        const u = usage as Record<string, unknown>;
-        const prompt = numberOr(u["prompt_tokens"], 0);
-        const cached = details(u)["cached_tokens"] ?? 0;
-        yield {
-          type: "usage",
-          usage: {
-            inputTokens: prompt,
-            outputTokens: numberOr(u["completion_tokens"], 0),
-            cachedTokens: typeof cached === "number" ? cached : 0,
-            totalTokens: numberOr(u["total_tokens"], prompt + numberOr(u["completion_tokens"], 0)),
-            modelCalls: 1,
-            toolCalls: 0,
-            costUsd: null,
-          },
-        };
-      }
+      }, this.streamTimeoutSeconds * 1000);
+      // Never hold the process open just to enforce a timeout.
+      if (typeof watchdog.unref === "function") watchdog.unref();
+    };
+    const controller = new AbortController();
+    const onExternalAbort = (): void => controller.abort();
+    if (req.signal) {
+      if (req.signal.aborted) onExternalAbort();
+      else req.signal.addEventListener("abort", onExternalAbort, { once: true });
     }
-    if (!finished) yield { type: "finish", stopReason: "stream_end" };
+
+    try {
+      // Assemble streamed tool calls keyed by index.
+      const pending = new Map<number, { id: string; name: string; args: string }>();
+      let finished = false;
+
+      for await (const payload of sseEvents(res.body, controller.signal)) {
+        sawAnyChunk = true;
+        armWatchdog();
+        if (payload === "[DONE]") {
+          finished = true;
+          break;
+        }
+        let chunk: Record<string, unknown>;
+        try {
+          chunk = JSON.parse(payload) as Record<string, unknown>;
+        } catch {
+          continue; // tolerate keepalives/fragmented lines
+        }
+        const choices = Array.isArray(chunk["choices"]) ? (chunk["choices"] as Array<Record<string, unknown>>) : [];
+        const choice = choices[0];
+        if (choice) {
+          const delta = (choice["delta"] ?? {}) as Record<string, unknown>;
+          const content = delta["content"];
+          if (typeof content === "string" && content.length > 0) {
+            yield { type: "text_delta", text: content };
+          }
+          const toolChunks = delta["tool_calls"];
+          if (Array.isArray(toolChunks)) {
+            for (const [i, raw] of toolChunks.entries()) {
+              const tc = raw as Record<string, unknown>;
+              const idx = typeof tc["index"] === "number" ? tc["index"] : i;
+              const slot = pending.get(idx) ?? { id: "", name: "", args: "" };
+              if (typeof tc["id"] === "string") slot.id = tc["id"];
+              if (typeof tc["function"] === "object" && tc["function"] !== null) {
+                const fn = tc["function"] as Record<string, unknown>;
+                if (typeof fn["name"] === "string") slot.name += fn["name"];
+                if (typeof fn["arguments"] === "string") slot.args += fn["arguments"];
+              }
+              pending.set(idx, slot);
+            }
+          }
+          const finish = choice["finish_reason"];
+          if (typeof finish === "string" && finish.length > 0) {
+            for (const slot of pending.values()) {
+              if (slot.name) {
+                const call: ToolCall = { id: slot.id || `call_${slot.name}`, name: slot.name, argumentsJson: slot.args };
+                yield { type: "tool_call_delta", toolCall: call };
+              }
+            }
+            pending.clear();
+            yield { type: "finish", stopReason: finish };
+          }
+        }
+        const usage = chunk["usage"];
+        if (usage && typeof usage === "object") {
+          const u = usage as Record<string, unknown>;
+          const prompt = numberOr(u["prompt_tokens"], 0);
+          const cached = details(u)["cached_tokens"] ?? 0;
+          yield {
+            type: "usage",
+            usage: {
+              inputTokens: prompt,
+              outputTokens: numberOr(u["completion_tokens"], 0),
+              cachedTokens: typeof cached === "number" ? cached : 0,
+              totalTokens: numberOr(u["total_tokens"], prompt + numberOr(u["completion_tokens"], 0)),
+              modelCalls: 1,
+              toolCalls: 0,
+              costUsd: null,
+            },
+          };
+        }
+      }
+      if (!finished) yield { type: "finish", stopReason: "stream_end" };
+    } catch (err) {
+      // Watchdog aborts surface as retryable timeouts; genuine user cancels
+      // (external signal) keep their AbortError identity.
+      if (req.signal?.aborted) throw err;
+      const isWatchdogAbort = controller.signal.aborted && !req.signal?.aborted;
+      if (isWatchdogAbort) {
+        throw new ProviderError(
+          `provider stream stalled: no data for ${this.streamTimeoutSeconds}s${sawAnyChunk ? " (mid-stream)" : " before first chunk"}`,
+          undefined,
+          true,
+        );
+      }
+      throw err;
+    } finally {
+      if (watchdog) clearTimeout(watchdog);
+      if (req.signal) req.signal.removeEventListener("abort", onExternalAbort);
+    }
   }
 }
 
@@ -166,7 +213,22 @@ async function* sseEvents(body: ReadableStream<Uint8Array>, signal?: AbortSignal
   try {
     while (true) {
       if (signal?.aborted) throw new ProviderError("aborted", undefined, false);
-      const { done, value } = await reader.read();
+      // Race the read against the abort signal so a watchdog abort (or user
+      // cancel) interrupts even when the socket is silent.
+      const readPromise = reader.read();
+      const result = signal
+        ? await Promise.race([readPromise, abortPromise(signal)])
+        : await readPromise;
+      if (!result) {
+        void readPromise.catch(() => undefined); // loser of the race: swallow its rejection
+        try {
+          await reader.cancel();
+        } catch {
+          /* socket already gone */
+        }
+        throw new ProviderError("aborted", undefined, false);
+      }
+      const { done, value } = result;
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       let nl: number;
@@ -179,6 +241,25 @@ async function* sseEvents(body: ReadableStream<Uint8Array>, signal?: AbortSignal
   } finally {
     reader.releaseLock();
   }
+}
+
+/** Resolves null when the signal aborts; used to race an in-flight read. */
+function abortPromise(signal: AbortSignal): Promise<null> {
+  if (signal.aborted) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const onAbort = (): void => resolve(null);
+    if (typeof signal.addEventListener === "function") {
+      signal.addEventListener("abort", onAbort, { once: true });
+    } else {
+      // Undici's AbortSignal polyfills used in some runtimes lack addEventListener.
+      const timer = setInterval(() => {
+        if (signal.aborted) {
+          clearInterval(timer);
+          resolve(null);
+        }
+      }, 100);
+    }
+  });
 }
 
 function joinUrl(base: string, path: string): string {
