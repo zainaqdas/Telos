@@ -98,6 +98,13 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     skillRouter,
     learner,
     repoProfile,
+    onNotice: (text) => {
+      if (text.startsWith("Runtime lesson")) out(`  ℹ ${text.slice(0, 140)}`);
+      else if (text.startsWith("PROJECT MEMORY") && process.env["SYNERGON_DEBUG_MEMORY"] === "1") {
+        out(`  ℹ memory injected:`);
+        for (const line of text.split("\n").slice(1)) out(`    ${line.slice(0, 130)}`);
+      }
+    },
   });
 
   // ─── Terminal setup ─────────────────────────────────────────────────────────

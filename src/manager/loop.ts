@@ -33,6 +33,8 @@ export interface ManagerDeps {
   skillRouter?: SkillRouter;
   learner?: FailureLearner;
   repoProfile?: string;
+  /** Live UI hook for runtime notices (memory injection, lessons). */
+  onNotice?: (text: string) => void;
 }
 
 export interface RunOptions {
@@ -361,6 +363,11 @@ export class ManagerLoop {
   /** Inject a runtime notice into the transcript (not attributed to the user). */
   private pushSystemNotice(text: string): void {
     this.messages.push({ role: "system", parts: [{ type: "text", text }] });
+    try {
+      this.deps.onNotice?.(text);
+    } catch {
+      /* observers must never break the run */
+    }
   }
 
   /**
