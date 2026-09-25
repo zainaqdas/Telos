@@ -1,5 +1,25 @@
 # Synergon — Phase Reports
 
+## Phase 6 — Worker Polish (with stream-timeout hardening)
+
+**Implemented**
+
+- Provider stream inactivity timeout (prereq from the live delegation eval): watchdog aborts after `runtime.stream_timeout_seconds` (default 120, 0 disables) without data; SSE reads race the abort signal so silent sockets are interruptible; stalls surface as retryable errors with bounded retries (`maxStreamAttempts`, backoff) then clean failure; timers unref'd (Part 45/86)
+- Multi-cycle workers (Part 10 lifecycle): a worker that ends with `WAITING: <need>` enters a persistent waiting state instead of terminating; `worker_waiting` events recorded
+- `continue_worker` tool: resumes a waiting worker with a concrete update ("the fix is now applied — re-review"); the worker's task-local context persists across cycles (same session object, cycle counter, prior report); resumption emits `worker_started(resumed, cycle)`; completion cleans the session (Part 11)
+- Unknown or stale `continue_worker` ids are refused with the list of currently waiting workers
+- Report reconciliation now **persists to memory**: verified findings → `fact` store, objections → new `objection` store, both keyed by content for dedup and retrievable trust-ordered in future sessions (`PRIOR OBJECTION … evaluate whether it still applies`) — no raw event-log spelunking
+
+**Tested** — mid-stream stall abort (retryable, first chunk preserved), pre-first-chunk stall, bounded retry exhaustion path (config-level), waiting→resume lifecycle including session cleanup and `resumed` events, unknown-id refusal with waiting list, memory persistence of findings/objections and their retrieval.
+
+**Verified** — 68/68 tests, strict typecheck clean.
+
+**Failed / learned** — racing a stream read against abort required the reader to consume the losing read's rejection, and the watchdog timer needed unref: two subtle ways a timeout fix itself hangs or holds the process. Both surfaced as test-harness hangs before ever running live.
+
+**Remaining** — waiting-worker summary line in `/status`; cross-worker objection debate (Phase 7); staffing evaluation against real workloads.
+
+**Architecture changes** — workers gained durable task-scoped sessions (`WorkerSession`) and a second tool (`continue_worker`); memory gained one store kind. No new completion authority.
+
 ## Phase 5 — Manager Orchestration
 
 **Implemented**

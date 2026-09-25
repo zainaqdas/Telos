@@ -43,13 +43,27 @@ interface DelegationResult {
   tokens: number;
   toolCalls: number;
   error?: string;
+  /** Populated when the worker signals it needs another cycle. */
+  waitingFor?: string;
+}
+
+interface WorkerSession {
+  id: string;
+  role: WorkerRole;
+  question: string;
+  context?: string;
+  cycles: number;
+  /** What the worker said it is waiting for (from its last WAITING line). */
+  waitingFor?: string;
+  lastReport: WorkerReport;
 }
 
 const VALID_ROLES = new Set(Object.keys(ROLES));
 
 export class Orchestrator {
   private workerSeq = 0;
-  private readonly rejectionHits = new Set<string>();
+  /** Task-scoped worker sessions (multi-cycle resumability, Part 11). */
+  private readonly sessions = new Map<string, WorkerSession>();
   private readonly deps: OrchestratorDeps;
 
   constructor(deps: OrchestratorDeps) {
@@ -66,6 +80,43 @@ export class Orchestrator {
     }
     if (!question) return { ok: false, error: "question is required — state the specific engineering question this worker must answer" };
     return { ok: true, req: { role: role as WorkerRole, question, context } };
+  }
+
+  /** Validate continue_worker tool call arguments. */
+  parseContinue(args: Record<string, unknown>): { ok: true; workerId: string; update: string } | { ok: false; error: string } {
+    const workerId = typeof args["worker_id"] === "string" ? args["worker_id"].trim() : "";
+    const update = typeof args["update"] === "string" ? args["update"].trim() : "";
+    if (!workerId) return { ok: false, error: "worker_id is required (from the original delegate result)" };
+    if (!update) return { ok: false, error: "update is required — tell the worker what changed since it went waiting" };
+    return { ok: true, workerId, update };
+  }
+
+  /** Continue tool definition for resuming waiting workers. */
+  continueTool(): ToolDefinition {
+    return {
+      name: "continue_worker",
+      description:
+        "Resume a waiting worker (one that ended with WAITING) after the situation changed — e.g. the fix is now applied, a test run exists, credentials were added. Supply what changed as the update.",
+      permission: "read",
+      mutative: false,
+      risk: "low",
+      parameters: {
+        type: "object",
+        properties: {
+          worker_id: { type: "string", description: "The workerId from the original delegate result" },
+          update: { type: "string", description: "What changed since the worker went waiting (concrete: files edited, commands run, answers)" },
+        },
+        required: ["worker_id", "update"],
+        additionalProperties: false,
+      },
+      execute: async (args, _ctx) => {
+        void _ctx;
+        const parsed = this.parseContinue(args);
+        if (!parsed.ok) return { ok: false, output: `continue_worker: ${parsed.error}`, errorCategory: "bad_args" };
+        const result = await this.continueWorker(parsed.workerId, parsed.update);
+        return { ok: !result.error, output: result.error ?? formatReportForManager(result.role, result.workerId, result.report) };
+      },
+    };
   }
 
   /** Delegate tool definition, registered once; executes via runDelegation. */
@@ -97,7 +148,12 @@ export class Orchestrator {
     };
   }
 
-  /** Run one delegation: budget-gated spawn → scoped worker loop → report. */
+  /**
+   * Run one delegation: budget-gated spawn → scoped worker loop → report.
+   * If the worker ends with a WAITING line (needs something it cannot get —
+   * e.g. a pending edit to review), the session is kept and resumable via
+   * continue_worker (Part 10 lifecycle: working → waiting → working).
+   */
   async runDelegation(req: DelegationRequest): Promise<DelegationResult> {
     // Hard worker budgets (Part 22): spawn + parallel limits are runtime-enforced.
     const spawnVerdict = this.deps.budget.check("worker_spawn");
@@ -110,32 +166,102 @@ export class Orchestrator {
     this.deps.events.append("delegation", { workerId, role: req.role, question: req.question.slice(0, 200) });
     this.deps.events.append("worker_started", { id: workerId, role: req.role });
 
+    const session: WorkerSession = {
+      id: workerId,
+      role: req.role,
+      question: req.question,
+      context: req.context,
+      cycles: 0,
+      lastReport: { findings: [], risks: [], recommendations: [], objections: [], raw: "" },
+    };
+    this.sessions.set(workerId, session);
+
     try {
-      const scoped = this.scopedRegistry(ROLES[req.role].allowedTools);
-      const loop = new ManagerLoop({
-        provider: this.deps.provider,
-        model: this.deps.model,
-        config: this.deps.config,
-        registry: scoped,
-        events: this.deps.events,
-        budget: this.deps.budget, // shared pools: workers and manager draw the same budget (Part 22)
-        cancellation: this.deps.cancellation,
-        ctx: this.deps.ctx,
-        learner: this.deps.learner,
-        workerPromptOverride: {
-          text: `You are ${req.role}, a task-scoped specialist worker. ${ROLES[req.role].mission}\n\nOUTPUT CONTRACT: ${ROLES[req.role].outputContract}\n\nYou are read-only in this workspace${req.role === "qa" ? " (you may run tests/builds but must not modify source)" : ""}. The Manager integrates your report; do not edit production files.\n\nQUESTION FROM MANAGER: ${req.question}${req.context ? `\n\nCONTEXT: ${req.context}` : ""}\n\nProduce your report now.`,
-          isWorker: true,
-        },
-      });
-      const result = await loop.run(`Answer the Manager's question: ${req.question}`);
-      this.deps.events.append("worker_completed", { id: workerId, ok: result.status !== "provider_error" && result.status !== "cancelled" });
-      const report = parseWorkerReport(result.assistantText);
-      this.reconcile(workerId, req.role, report);
-      return { workerId, role: req.role, report, tokens: result.usage.totalTokens, toolCalls: this.deps.budget.used.toolCalls };
+      const result = await this.runCycle(session, req.context);
+      return result;
     } catch (err) {
       this.deps.events.append("worker_completed", { id: workerId, ok: false });
+      this.sessions.delete(workerId);
       return this.failed(`worker ${workerId} (${req.role}) failed: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Resume a waiting worker with new context (e.g. "the fix is now applied —
+   * re-review"). Refuses unknown or already-completed workers.
+   */
+  async continueWorker(workerId: string, update: string): Promise<DelegationResult> {
+    const session = this.sessions.get(workerId);
+    if (!session) {
+      return this.failed(`continue_worker: no waiting worker '${workerId}'. Waiting: ${this.waitingWorkerIds().join(", ") || "none"}.`);
+    }
+    this.deps.events.append("worker_started", { id: workerId, role: session.role, resumed: true, cycle: session.cycles + 1 });
+    try {
+      const result = await this.runCycle(session, update);
+      return result;
+    } catch (err) {
+      this.deps.events.append("worker_completed", { id: workerId, ok: false });
+      this.sessions.delete(workerId);
+      return this.failed(`worker ${workerId} failed on resume: ${(err as Error).message}`);
+    }
+  }
+
+  /** IDs of workers currently in the waiting state. */
+  waitingWorkerIds(): string[] {
+    return [...this.sessions.entries()].filter(([, s]) => s.waitingFor).map(([id]) => id);
+  }
+
+  /** One investigation cycle: scoped loop run → report parse → reconcile. */
+  private async runCycle(session: WorkerSession, extraContext?: string): Promise<DelegationResult> {
+    const scoped = this.scopedRegistry(ROLES[session.role].allowedTools);
+    const cycle = session.cycles + 1;
+    const loop = new ManagerLoop({
+      provider: this.deps.provider,
+      model: this.deps.model,
+      config: this.deps.config,
+      registry: scoped,
+      events: this.deps.events,
+      budget: this.deps.budget, // shared pools: workers and manager draw the same budget (Part 22)
+      cancellation: this.deps.cancellation,
+      ctx: this.deps.ctx,
+      learner: this.deps.learner,
+      workerPromptOverride: {
+        text:
+          `You are ${session.role}, a task-scoped specialist worker. ${ROLES[session.role].mission}\n\n` +
+          `OUTPUT CONTRACT: ${ROLES[session.role].outputContract}\n` +
+          `If you cannot complete your mission because you are waiting on something (e.g. an edit not yet applied, missing test run), end your reply with a line 'WAITING: <what you need>' instead of speculating.\n\n` +
+          `You are read-only in this workspace${session.role === "qa" ? " (you may run tests/builds but must not modify source)" : ""}. The Manager integrates your report; do not edit production files.\n\n` +
+          `QUESTION FROM MANAGER: ${session.question}${session.context ? `\n\nCONTEXT: ${session.context}` : ""}${extraContext ? `\n\nUPDATE FROM MANAGER: ${extraContext}` : ""}\n\n` +
+          (cycle > 1 ? `This is investigation cycle ${cycle}; you already reported ${session.cycles} time(s). Build on your prior findings.` : "Produce your report now."),
+        isWorker: true,
+      },
+    });
+    const result = await loop.run(cycle === 1 ? `Answer the Manager's question: ${session.question}` : `Continue your investigation: ${extraContext ?? ""}`);
+    session.cycles = cycle;
+    const report = parseWorkerReport(result.assistantText);
+    session.lastReport = report;
+
+    // Waiting state detection: explicit WAITING line in the final message.
+    const waitingMatch = /WAITING:\s*(.+)$/im.exec(result.assistantText);
+    if (waitingMatch && !result.assistantText.includes("VERDICT") && report.findings.length === 0) {
+      session.waitingFor = waitingMatch[1]!.trim().slice(0, 200);
+      this.deps.events.append("worker_waiting", { id: session.id, role: session.role, cycle, waiting_for: session.waitingFor });
+      return {
+        workerId: session.id,
+        role: session.role,
+        report,
+        tokens: result.usage.totalTokens,
+        toolCalls: this.deps.budget.used.toolCalls,
+        waitingFor: session.waitingFor,
+        error: `WORKER WAITING: ${session.waitingFor}. Resume later with continue_worker (workerId: ${session.id}) when the situation changes.`,
+      };
+    }
+
+    session.waitingFor = undefined;
+    this.deps.events.append("worker_completed", { id: session.id, ok: result.status !== "provider_error" && result.status !== "cancelled", cycle });
+    this.reconcile(session.id, session.role, report);
+    if (cycle > 1) this.sessions.delete(session.id);
+    return { workerId: session.id, role: session.role, report, tokens: result.usage.totalTokens, toolCalls: this.deps.budget.used.toolCalls };
   }
 
   /** Run several delegations with bounded parallelism; returns all results. */
@@ -155,13 +281,31 @@ export class Orchestrator {
     return results;
   }
 
-  /** Record findings/objections as first-class events (Parts 12–13). */
+  /** Record findings/objections as first-class events (Parts 12–13) and
+   *  persist them to memory so future sessions retrieve them without
+   *  re-reading raw event logs. */
   private reconcile(workerId: string, role: WorkerRole, report: WorkerReport): void {
     for (const f of report.findings.slice(0, 5)) {
-      this.deps.events.append("finding", { source: `${role}:${workerId}`, text: f.claim.slice(0, 240) });
+      const text = f.claim.slice(0, 240);
+      this.deps.events.append("finding", { source: `${role}:${workerId}`, text });
+      this.deps.learner?.store.add({
+        type: "fact",
+        key: text.slice(0, 100),
+        statement: text,
+        source: `${role}:${workerId}`,
+        verified: Boolean(f.evidence),
+      });
     }
     for (const o of report.objections.slice(0, 3)) {
-      this.deps.events.append("objection", { raised_by: `${role}:${workerId}`, statement: o.statement.slice(0, 240) });
+      const statement = o.statement.slice(0, 240);
+      this.deps.events.append("objection", { raised_by: `${role}:${workerId}`, statement });
+      this.deps.learner?.store.add({
+        type: "objection",
+        key: statement.slice(0, 100),
+        statement,
+        source: `${role}:${workerId}`,
+        verified: true,
+      });
     }
   }
 

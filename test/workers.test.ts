@@ -13,6 +13,7 @@ import { CancellationController } from "../src/runtime/cancellation.ts";
 import { EventLog } from "../src/events/log.ts";
 import { CompletionGate } from "../src/gate/gate.ts";
 import { reduce } from "../src/events/state.ts";
+import { FailureLearner } from "../src/memory/pipeline.ts";
 import { Orchestrator } from "../src/workers/orchestrator.ts";
 import { parseWorkerReport, ROLES } from "../src/workers/roles.ts";
 import type { SynergonConfig } from "../src/config/schema.ts";
@@ -63,6 +64,7 @@ function fullSetup(dir: string, provider: Provider, over: Partial<{ maxWorkerSpa
   });
   const orchestrator = new Orchestrator({ provider, model: "fake-1", config: fakeConfig(), registry, events, budget, cancellation, ctx: makeContext(dir, { shellTimeoutSeconds: 15 }) });
   registry.register(orchestrator.delegateTool());
+  registry.register(orchestrator.continueTool());
   return { registry, events, budget, orchestrator, cancellation };
 }
 
@@ -153,6 +155,85 @@ test("worker budget refusal: no spawn beyond maxWorkerSpawns", async () => {
     assert.equal(budget.used.workersSpawned, 1);
     // No second worker_started.
     assert.equal(events.readAll().filter((e) => e.kind === "worker_started").length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("waiting worker persists, resumes via continue_worker, and reconciles on completion", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-w5-"));
+  try {
+    writeFileSync(join(dir, "feature.ts"), "export const feature = () => 1;\n", "utf8");
+    // Reviewer's first cycle: nothing to review yet → WAITING. Second cycle: full report.
+    const provider = new RoleRoutingProvider([
+      { marker: "You are reviewer", chunks: [{ type: "text_delta", text: "WAITING: the fix is not applied yet" }], after: [
+        { type: "text_delta", text: "VERDICT: approve\nFINDING: the applied fix is minimal and correct\nEVIDENCE: feature.ts:1\nCONFIDENCE: high" },
+      ] },
+    ]);
+    const { events, orchestrator } = fullSetup(dir, provider);
+
+    const first = await orchestrator.runDelegation({ role: "reviewer", question: "review the feature fix" });
+    assert.match(first.error ?? "", /WORKER WAITING/);
+    assert.equal(first.waitingFor, "the fix is not applied yet");
+    assert.ok(orchestrator.waitingWorkerIds().includes(first.workerId));
+    assert.ok(events.readAll().some((e) => e.kind === "worker_waiting"));
+    // No premature completion event.
+    assert.ok(!events.readAll().some((e) => e.kind === "worker_completed"));
+
+    const second = await orchestrator.continueWorker(first.workerId, "the fix is now applied to feature.ts; review it");
+    assert.ok(!second.error);
+    assert.equal(second.report.verdict, "approve");
+    assert.ok(!orchestrator.waitingWorkerIds().includes(first.workerId), "session cleaned after completion");
+    const state = reduce(events.readAll());
+    assert.ok(state.workers.get(first.workerId)?.status === "completed");
+    assert.ok(events.readAll().some((e) => e.kind === "worker_started" && e.data["resumed"] === true));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("continue_worker refuses unknown worker ids and lists waiting ones", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-w6-"));
+  try {
+    const provider = new RoleRoutingProvider([{ marker: "You are explorer", chunks: [{ type: "text_delta", text: "WAITING: need db credentials" }] }]);
+    const { orchestrator } = fullSetup(dir, provider);
+    await orchestrator.runDelegation({ role: "explorer", question: "inspect the migration state" });
+    const bad = await orchestrator.continueWorker("wX-nope", "irrelevant");
+    assert.match(bad.error ?? "", /no waiting worker 'wX-nope'/);
+    assert.match(bad.error ?? "", /w\d+-[0-9a-f]{4}/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worker findings and objections persist to memory for future sessions", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-w7-"));
+  try {
+    const { MemoryStore } = await import("../src/memory/store.ts");
+    const store = new MemoryStore(dir);
+    const learner = new FailureLearner(store);
+    const provider = new RoleRoutingProvider([
+      { marker: "You are reviewer", chunks: [{ type: "text_delta", text: "VERDICT: request_changes\nFINDING: the shortcut bypasses CSRF binding\nEVIDENCE: login.js:12\nOBJECTION: special-casing admin re-creates the open-redirect bug class" }] },
+    ]);
+    const { orchestrator } = fullSetup(dir, provider);
+    // Attach learner via a fresh orchestrator that has it.
+    const registry = new ToolRegistry();
+    registerFilesystemTools(registry);
+    const cancellation = new CancellationController();
+    registerShellTools(registry, { cancellation });
+    const events = new EventLog(join(dir, "ev"), "t");
+    events.append("task_started", { title: "x" });
+    const budget = new BudgetEnforcer({ maxTotalTokens: 100_000, maxToolCalls: 10, maxWorkerSpawns: 2, maxParallelWorkers: 1, maxWallTimeSeconds: 60 });
+    const orch2 = new Orchestrator({ provider, model: "fake-1", config: fakeConfig(), registry, events, budget, cancellation, ctx: makeContext(dir, { shellTimeoutSeconds: 15 }), learner });
+    await orch2.runDelegation({ role: "reviewer", question: "review the login change" });
+
+    const facts = store.all("fact");
+    assert.ok(facts.some((f) => /CSRF binding/.test(f.statement) && f.verified));
+    const objections = store.all("objection");
+    assert.ok(objections.some((o) => /open-redirect/.test(o.statement)));
+    // Retrieval surfaces the prior objection for a related instruction.
+    const text = learner.formatForContext(learner.retrieveFor("review the admin shortcut in login.js"));
+    assert.match(text, /PRIOR OBJECTION/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

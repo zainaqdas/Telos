@@ -11,7 +11,7 @@ import { join } from "node:path";
  *   user_rule > verified fact > verified lesson > decision > observation > hypothesis
  */
 
-export type MemoryKind = "fact" | "lesson" | "decision" | "failure" | "rejected_approach" | "user_rule";
+export type MemoryKind = "fact" | "lesson" | "decision" | "failure" | "rejected_approach" | "user_rule" | "objection";
 
 export interface MemoryRecord {
   type: MemoryKind;
@@ -44,6 +44,7 @@ const TRUST: Record<MemoryKind, number> = {
   decision: 3,
   failure: 4,
   rejected_approach: 5,
+  objection: 6,
 };
 
 const FILES: Record<MemoryKind, string> = {
@@ -53,6 +54,7 @@ const FILES: Record<MemoryKind, string> = {
   failure: "failures.jsonl",
   rejected_approach: "rejected.jsonl",
   user_rule: "user-rules.jsonl",
+  objection: "objections.jsonl",
 };
 
 export class MemoryStore {

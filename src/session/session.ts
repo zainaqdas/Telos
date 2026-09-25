@@ -105,6 +105,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     learner,
   });
   registry.register(orchestrator.delegateTool());
+  registry.register(orchestrator.continueTool());
 
   const manager = new ManagerLoop({
     provider,

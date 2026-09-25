@@ -158,7 +158,7 @@ export class FailureLearner {
 
   /** Retrieve memory relevant to an instruction, capped, trust-ordered. */
   retrieveFor(instruction: string, limit = 6): MemoryRecord[] {
-    return this.store.query(instruction, ["user_rule", "lesson", "rejected_approach", "fact", "decision"], limit);
+    return this.store.query(instruction, ["user_rule", "lesson", "rejected_approach", "fact", "decision", "objection"], limit);
   }
 
   /** Format retrieved memory for injection into the model context. */
@@ -181,6 +181,9 @@ export class FailureLearner {
           break;
         case "decision":
           lines.push(`- DECISION: ${r.statement}`);
+          break;
+        case "objection":
+          lines.push(`- PRIOR OBJECTION (${r.source}): ${r.statement} — evaluate whether it still applies before proceeding.`);
           break;
         default:
           break;

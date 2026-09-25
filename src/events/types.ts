@@ -16,6 +16,7 @@ export type EventKind =
   | "decision"
   | "delegation"
   | "worker_started"
+  | "worker_waiting"
   | "worker_completed"
   | "tool_started"
   | "tool_completed"
