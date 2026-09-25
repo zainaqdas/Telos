@@ -14,6 +14,7 @@ import { EventLog } from "../events/log.ts";
 import { CompletionGate } from "../gate/gate.ts";
 import { ManagerLoop } from "../manager/loop.ts";
 import { profileRepository } from "../context/profile.ts";
+import { StreamPrinter, streamWidth } from "./stream-printer.ts";
 
 /**
  * Interactive session (Part 60/62): terminal-native, minimal, no web UI.
@@ -95,6 +96,10 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   printBanner(config, taskId);
   renderBudgetBar(budget);
 
+  // Streamed model text goes through the printer: raw passthrough on a TTY
+  // (the terminal wraps), word-boundary wrapping at terminal width otherwise.
+  const printer = new StreamPrinter({ width: isRawSupported ? Number.POSITIVE_INFINITY : streamWidth(process.stdout, process.env) });
+
   const prompt = (): void => {
     process.stdout.write(`\n> `);
   };
@@ -105,6 +110,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       if (byte === 0x03) {
         // Ctrl+C: cancel the running task first; exit if idle or pressed twice.
         if (manager.isBusy()) {
+          printer.end();
           cancellation.cancel("user pressed Ctrl+C");
           out("\n[cancellation signal sent — terminating task and child processes]");
         } else if (lineBuffer.length > 0) {
@@ -170,9 +176,13 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     const started = Date.now();
     try {
       const result = await manager.run(trimmed, {
-        onText: (delta) => out(delta),
-        onTool: (name, summary) => out(`\n  ⚙ ${name}  ${summary}`),
+        onText: (delta) => printer.push(delta),
+        onTool: (name, summary) => {
+          printer.newline();
+          out(`  ⚙ ${name}  ${summary}`);
+        },
       });
+      printer.end();
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);
       out(`\n[${result.status} in ${elapsed}s]`);
       if (result.gate) out(`Gate: ${result.gate.verdict} — ${result.gate.summary}`);

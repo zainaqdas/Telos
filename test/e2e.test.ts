@@ -25,7 +25,9 @@ test("e2e: chat session completes a read-only instruction via mock provider", as
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.end(
           [
-            'data: {"choices":[{"delta":{"content":"The file contains a greeting."}}]}',
+            'data: {"choices":[{"delta":{"content":"The file "}}]}',
+            'data: {"choices":[{"delta":{"content":"contains a "}}]}',
+            'data: {"choices":[{"delta":{"content":"greeting."}}]}',
             'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
             'data: {"usage":{"prompt_tokens":10,"completion_tokens":8,"total_tokens":18}}',
             "data: [DONE]",
@@ -65,9 +67,10 @@ test("e2e: chat session completes a read-only instruction via mock provider", as
     await waitFor(() => stdout.includes(">"), 5000);
     child.stdin!.write("read sample.txt and summarize\n");
 
-    const done = await waitFor(() => stdout.includes("[completed"), 10_000);
-    assert.ok(done, `session did not reach completed state. stdout:\n${stdout}\nstderr:\n${stderr}`);
-    assert.match(stdout, /The file contains a greeting\./);
+    const done = await waitFor(() => stdout.includes("[completed"), 10_000);      assert.ok(done, `session did not reach completed state. stdout:\n${stdout}\nstderr:\n${stderr}`);
+      // Deltas must stream contiguously: word-boundary wrapped for non-TTY,
+      // never one-line-per-chunk.
+      assert.match(stdout, /The file contains a greeting\./);
     assert.match(stdout, /Gate: COMPLETE/);
     assert.match(stdout, /budget: tokens 18\/80000/);
   } finally {
