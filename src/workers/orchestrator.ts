@@ -212,9 +212,10 @@ export class Orchestrator {
   }
 
   /** One investigation cycle: scoped loop run → report parse → reconcile. */
-  private async runCycle(session: WorkerSession, extraContext?: string): Promise<DelegationResult> {
+  private async runCycle(session: WorkerSession, extraContext?: string, isRetry = false): Promise<DelegationResult> {
     const scoped = this.scopedRegistry(ROLES[session.role].allowedTools);
     const cycle = session.cycles + 1;
+    const roleSpec = ROLES[session.role];
     const loop = new ManagerLoop({
       provider: this.deps.provider,
       model: this.deps.model,
@@ -227,8 +228,8 @@ export class Orchestrator {
       learner: this.deps.learner,
       workerPromptOverride: {
         text:
-          `You are ${session.role}, a task-scoped specialist worker. ${ROLES[session.role].mission}\n\n` +
-          `OUTPUT CONTRACT: ${ROLES[session.role].outputContract}\n` +
+          `You are ${session.role}, a task-scoped specialist worker. ${roleSpec.mission}\n\n` +
+          `OUTPUT CONTRACT — use EXACTLY these section headers, each on its own line:\n${roleSpec.outputContract}\n` +
           `If you cannot complete your mission because you are waiting on something (e.g. an edit not yet applied, missing test run), end your reply with a line 'WAITING: <what you need>' instead of speculating.\n\n` +
           `You are read-only in this workspace${session.role === "qa" ? " (you may run tests/builds but must not modify source)" : ""}. The Manager integrates your report; do not edit production files.\n\n` +
           `QUESTION FROM MANAGER: ${session.question}${session.context ? `\n\nCONTEXT: ${session.context}` : ""}${extraContext ? `\n\nUPDATE FROM MANAGER: ${extraContext}` : ""}\n\n` +
@@ -236,9 +237,21 @@ export class Orchestrator {
         isWorker: true,
       },
     });
-    const result = await loop.run(cycle === 1 ? `Answer the Manager's question: ${session.question}` : `Continue your investigation: ${extraContext ?? ""}`);
+    const retryNote = isRetry ? "\n\nFORMAT REMINDER: your previous reply did not use the required section headers. Rewrite it using the exact headers from the output contract." : "";
+    const result = await loop.run(
+      (cycle === 1 ? `Answer the Manager's question: ${session.question}` : `Continue your investigation: ${extraContext ?? ""}`) + retryNote,
+    );
     session.cycles = cycle;
-    const report = parseWorkerReport(result.assistantText);
+    let report = parseWorkerReport(result.assistantText);
+
+    // Contract enforcement: if the final message carried no structured
+    // sections at all, spend ONE retry asking for the exact headers (the
+    // content is usually good — only the shape is missing).
+    const structured = report.findings.length > 0 || report.risks.length > 0 || report.recommendations.length > 0 || report.objections.length > 0 || report.verdict !== undefined || report.tested!.length > 0;
+    if (!structured && !isRetry && !result.assistantText.includes("WAITING:")) {
+      this.deps.events.append("failure", { source: "worker_contract", message: `${session.role} reply lacked required section headers; retrying once with format reminder` });
+      return this.runCycle(session, extraContext, true);
+    }
     session.lastReport = report;
 
     // Waiting state detection: explicit WAITING line in the final message.
