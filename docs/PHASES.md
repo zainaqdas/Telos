@@ -1,5 +1,27 @@
 # Synergon — Phase Reports
 
+## Phase 5 — Manager Orchestration
+
+**Implemented**
+
+- `delegate` tool in the shared registry (no special channel): the Manager's model chooses role + question + context; the runtime enforces everything else (Part 90)
+- Four roles as toolset-scoped, mission-framed specialists — explorer, researcher, reviewer, qa — with explicit output contracts (FINDING/EVIDENCE/RISK/OBJECTION/RECOMMENDATION/VERDICT/CONFIDENCE); roles, not personalities (Part 9)
+- Workers run scoped `ManagerLoop` instances: filtered registry views (explorer/researcher/reviewer have zero write tools; qa adds `run_shell` only), no gate, no instruction recording, no per-worker memory injection or skill routing (their findings enter the shared stream via the orchestrator)
+- Worker budgets enforced at spawn: `max_worker_spawns` and `max_parallel_workers` checked by the runtime before each delegation; refusals tell the Manager to integrate and proceed (Part 22)
+- Bounded-parallel execution pool (`runParallel`) with lane count = min(configured parallel, queue)
+- Reconciliation: worker findings → `finding` events, objections → `objection` events (first-class, Part 13); `delegation`/`worker_started`/`worker_completed` lifecycle events
+- Manager remains the primary builder: no worker can mutate the workspace (verified by test: a QA worker attempting `edit_file` hits an unknown-tool wall and the file is unchanged) (Part 16)
+
+**Tested** — report parser structure, role toolset policy, parallel delegation with two concurrent workers, budget refusal at the spawn cap, findings/objection reconciliation into reduced state, single-writer preservation under a misbehaving worker.
+
+**Verified** — 64/64 tests, strict typecheck clean.
+
+**Failed / learned** — the first scripted test provider re-yielded tool-call turns forever, hanging a worker loop (fixed by converging scripts to prose); a `require()` slipped into ESM test code. Both test-side. No architectural changes.
+
+**Remaining** — staffing quality evaluation (Part 73) needs real-workload observation; worker→Manager clarification round-trips (a worker asking the Manager a question) deferred until Phase 7 collaboration; no worktrees (Part 16).
+
+**Architecture changes** — `ManagerDeps.gate` became optional (worker loops run gateless by contract) and gained `workerPromptOverride` to replace the system prompt and suppress instruction events. The delegate tool participates in repetition guarding, budget accounting, and the transcript like any other tool.
+
 ## Phase 4 — Memory + Failure Learning
 
 **Implemented**

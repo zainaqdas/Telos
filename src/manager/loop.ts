@@ -28,11 +28,14 @@ export interface ManagerDeps {
   budget: BudgetEnforcer;
   cancellation: CancellationController;
   ctx: ToolExecContext;
-  gate: CompletionGate;
+  gate?: CompletionGate;
   guard?: RepetitionGuard;
   skillRouter?: SkillRouter;
   learner?: FailureLearner;
   repoProfile?: string;
+  /** Worker-mode construction: replaces the system prompt, suppresses the
+   *  user_instruction event and per-instruction routing/memory injection. */
+  workerPromptOverride?: { text: string; isWorker: true };
   /** Live UI hook for runtime notices (memory injection, lessons). */
   onNotice?: (text: string) => void;
 }
@@ -66,12 +69,17 @@ export class ManagerLoop {
   private readonly deps: ManagerDeps;
   private usage: Usage = emptyUsage();
   private busy = false;
+  private readonly isWorker: boolean;
   private readonly rejectionHits = new Set<string>();
 
   constructor(deps: ManagerDeps) {
     this.deps = deps;
     this.guard = deps.guard ?? new RepetitionGuard(DEFAULT_GUARD_CONFIG);
-    this.messages.push({ role: "system", parts: [{ type: "text", text: buildSystemPrompt(deps.config, deps.repoProfile) }] });
+    this.messages.push({
+      role: "system",
+      parts: [{ type: "text", text: deps.workerPromptOverride ? deps.workerPromptOverride.text : buildSystemPrompt(deps.config, deps.repoProfile) }],
+    });
+    this.isWorker = deps.workerPromptOverride?.isWorker === true;
   }
 
   /** True while a run() is driving the model/tools. */
@@ -89,8 +97,11 @@ export class ManagerLoop {
     const isCorrection = opts.isCorrection === true;
     this.busy = true;
 
-    // Corrections are first-class: durable rule capture + rejection memory (Part 15/31).
-    if (isCorrection && this.deps.learner) {
+    // Worker loops do not re-record instructions or re-route skills; their
+    // findings enter the shared event stream through the orchestrator.
+    if (!this.isWorker) {
+      this.deps.events.append(isCorrection ? "user_correction" : "user_instruction", { text: instruction });
+      if (isCorrection && this.deps.learner) {
       try {
         const negation = instruction.match(/\b(?:don't|do not|never|stop|no)\s+(?:use|using|add|write|touch|run)\s+([a-z0-9@/._-]+)/i);
         const directive = instruction.match(/\b(?:use|always|prefer)\s+([a-z0-9@/._-]+(?:\s+[a-z0-9@/._-]+)?)/i);
@@ -104,11 +115,12 @@ export class ManagerLoop {
       } catch {
         /* rule capture must never break the run */
       }
+      }
     }
 
     // Deterministic skill routing (Part 34): runtime activates skills, the
     // model is informed but cannot skip or invent them.
-    if (this.deps.skillRouter) {
+    if (!this.isWorker && this.deps.skillRouter) {
       try {
         for (const match of await this.deps.skillRouter.route(instruction)) {
           this.deps.skillRouter.activate(match);
@@ -122,7 +134,7 @@ export class ManagerLoop {
     }
 
     // Memory retrieval (Part 32): capped, trust-ordered, never the archive.
-    if (this.deps.learner) {
+    if (!this.isWorker && this.deps.learner) {
       try {
         const memory = this.deps.learner.retrieveFor(instruction);
         const formatted = this.deps.learner.formatForContext(memory);
@@ -131,7 +143,6 @@ export class ManagerLoop {
         /* memory must never break the run */
       }
     }
-    this.deps.events.append(isCorrection ? "user_correction" : "user_instruction", { text: instruction });
     const prefix = isCorrection ? "CORRECTION — highest priority, supersedes earlier instructions where they conflict: " : "";
     this.messages.push({ role: "user", parts: [{ type: "text", text: `${prefix}${instruction}` }] });
 
@@ -186,6 +197,10 @@ export class ManagerLoop {
 
       if (toolCalls.length === 0) {
         // Model finished its turn with prose — the Gate decides what happens.
+        // Workers finish without a gate: their run ends at prose by contract.
+        if (this.isWorker || !this.deps.gate) {
+          return this.finish("completed", assistantText);
+        }
         const gate = this.deps.gate.evaluate();
         if (gate.verdict === "COMPLETE") this.deps.events.append("task_completed", { reason: "gate_complete" });
         const status: RunResult["status"] = gate.verdict === "COMPLETE" ? "completed" : gate.verdict === "BLOCKED" ? "blocked" : "incomplete";
