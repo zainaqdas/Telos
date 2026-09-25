@@ -1,0 +1,72 @@
+# Synergon — Phase Reports
+
+## Phase 0 — Foundation + Runtime Safety
+
+**Implemented**
+
+- TypeScript + Node CLI (`synergon`), zero runtime dependencies; native type-stripping instead of a build step
+- Layered configuration: defaults → `.project-agent/config.toml` (minimal TOML parser) → `SYNERGON_*` env vars
+- Event-sourced core: append-only JSONL `EventLog` → pure reducer → derived `TeamState` (Part 14)
+- Provider abstraction with explicit capabilities; one OpenAI-compatible streaming provider path (SSE, tool-call assembly, usage, abort) (Parts 52–53)
+- Hard budgets: tokens, tool calls, worker spawns, parallel workers, wall clock — checked by the runtime before every spend (Parts 22–23)
+- Real cancellation: abort propagation + process-tree termination (POSIX group kill / Windows taskkill /T) (Parts 46–47)
+- Circuit breakers: sliding-window conditions for failure storms, spawn storms, context explosion (Part 25)
+- CLI entry: `chat` / `init` / `status` / `help` / `version`, clean exit codes
+
+**Tested** — budget projection math, TOML parsing, config layering, event log append + torn-line recovery, reducer projections (requirements, correction invalidation, budget_exceeded), provider SSE parsing against a local HTTP server, and the mandatory no-orphan cancellation acceptance test (child + grandchild processes both terminated).
+
+**Verified** — `synergon init/status/version/help` run end-to-end; env overrides reach the runtime; typecheck clean.
+
+**Failed / learned** — `erasableSyntaxOnly` forbids parameter properties (rewrote several classes); a naive `current = current[k]` aliasing bug in the TOML section parser produced nested-table corruption; budget checks must use one injected clock, not a mix of injected and real time.
+
+**Remaining** — worker subsystem (deliberately deferred), UI polish.
+
+**Architecture changes** — none forced; reducer remained pure, log remained authoritative.
+
+## Phase 1 — Single-Agent Runtime
+
+**Implemented**
+
+- Unified Tool Registry: name/description/schema/permission/mutability/risk declared per tool; minimal deterministic JSON-schema validation (Part 43)
+- Filesystem tools (`read_file`, `write_file`, `edit_file`, `list_directory`, `find_files`, `search_text`) with workspace confinement (symlink-aware), redaction, truncation; `edit_file` is targeted and refuses ambiguous matches (Parts 44–45)
+- Shell tool: destructive-command refusal, timeouts, output caps, process-group spawn + tree kill on cancellation; Git tools (`git_status`, `git_diff`, `git_log`) (Part 46)
+- Repetition Guard: normalize → compare attempts → fingerprint relevant state → classify NEW / SAFE_RETRY / CHANGED_RETRY / REPEATED_FAILURE / KNOWN_BAD_PATTERN; the runtime refuses, the model cannot argue (Parts 25–27)
+- Persistent Manager loop: streaming tool-call turns, transcript assembly, single retry with backoff on retryable provider errors, per-spend budget checks (Part 86)
+- Minimal Completion Gate as the single completion authority: runtime-derived requirements from test/build/lint results, invalidation on failure, user-correction propagation, plus two deterministic anti-honesty rules — unverified workspace writes and change-request-without-work are never COMPLETE (Parts 17–21)
+- Interactive session: raw-mode terminal UI, streaming output, tool activity lines, budget bar, slash commands (`/help`, `/status`, `/diff`, `/cancel`, `/model`, `/exit`), two-stage Ctrl+C (cancel task → exit)
+
+**Tested** — tool behavior including path escapes, ambiguous edits, parent-dir creation, search results; redaction of the BYOK key and credential-shaped strings; repetition-guard verdict transitions; loop round-trips against a scripted provider (tool result fed back to the model, gate COMPLETE via test evidence, gate INCOMPLETE on failing tests, hard tool-call budget stop with `budget_exceeded` event, usage accounting); end-to-end CLI run against a local mock provider.
+
+**Verified** — single-agent runtime is useful without any workers (Phase 1 acceptance list: inspect → find → edit → test → fix → verify → diff → gate verdict).
+
+**Failed / learned** — the gate initially granted COMPLETE with zero requirements; a read-only task can legitimately complete, but the same rule would bless prose-only answers to "fix the bug" — fixed with deterministic mutation/verification rules instead of prompt exhortation. A test also overwrote `package.json` mid-run (removed the offending line; the guard belongs in the test itself, not in hope). Tools must return failed `ToolResult`s, not throw, so the model can recover.
+
+**Remaining** — skills, memory, workers, web/browser, multimodal.
+
+**Architecture changes** — Completion Gate gained two runtime-derived rules (unverified writes, requested-but-absent work). This is deliberate: "never trust done" is enforceable in code and belongs there, not in the prompt.
+
+## Phase 2 — Context Engine
+
+**Implemented**
+
+- `profileRepository`: capped incremental walk (depth ≤ 3, ≤ 4000 entries, ignore-aware)
+- Language detection with per-language extension merging; framework detection from dependencies; package manager detection with evidence (lockfiles) and correct command runner (pnpm/yarn/bun/npm; cargo, go)
+- Test/build/lint command discovery from `package.json` scripts or ecosystem defaults
+- Git state including unborn-HEAD repositories (`rev-parse --is-inside-work-tree`)
+- Instruction discovery: AGENTS.md / CLAUDE.md / PROJECT.md / README.md, top-priority first (Part 41)
+- Key directories and entry points; all compiled into a factual profile under a hard character budget — no file contents dumped (Parts 40, 42)
+- Session integration: profile injected into the system prompt each launch; `/profile` slash command
+
+**Tested** — synthetic unfamiliar-repo fixture: stack, package manager, runner-correct test command, instruction discovery, budget compliance (large file never inlined), non-node ecosystems (Cargo, go.mod).
+
+**Verified** — live CLI session against a fresh demo repo; profile output matches expectations; unfamiliar repo acceptance list (stack, package manager, tests, build, instructions, key files) satisfied without dumping the repository into context.
+
+**Failed / learned** — `detectPackageManager` returned evidence-suffixed names (`pnpm (pnpm-lock.yaml)`) and a strict-equality runner check silently fell back to npm — discovered only because the test asserted the final command string, not the internal field. Same-language extensions were double-counted before merging.
+
+**Remaining** — skills (Phase 3) and beyond, per roadmap stop point.
+
+**Architecture changes** — none; the profile is a pure function of the workspace plus a budget, consumed by the Manager as context, which keeps the Context Engine swappable and testable.
+
+## Evaluation Stop
+
+Per the master build instruction, implementation stops here for architectural reassessment against real tasks before Phase 3 (Skill Engine). See `docs/ARCHITECTURE.md` for the evaluation summary.
