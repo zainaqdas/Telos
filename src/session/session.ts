@@ -101,6 +101,8 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   }
   let lineBuffer = "";
   let rendering = false;
+  const pendingLines: string[] = [];
+  let processing = false;
 
   printBanner(config, taskId);
   renderBudgetBar(budget);
@@ -174,6 +176,39 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       prompt();
       return;
     }
+    // While a run is active, queue further input and process it sequentially
+    // when the run finishes — never concurrently (Part 15 corrections arrive
+    // this way during long runs).
+    if (manager.isBusy()) {
+      pendingLines.push(trimmed);
+      return;
+    }
+    processing = true;
+    try {
+      await processLine(trimmed);
+    } finally {
+      processing = false;
+    }
+    // Drain anything queued during the run.
+    while (pendingLines.length > 0) {
+      const next = pendingLines.shift()!;
+      if (next === "/exit" || next === "/quit") {
+        shutdown(0);
+        return;
+      }
+      if (manager.isBusy()) {
+        pendingLines.unshift(next);
+        return;
+      }
+      try {
+        await processLine(next);
+      } catch {
+        /* processLine handles its own errors */
+      }
+    }
+  };
+
+  const processLine = async (trimmed: string): Promise<void> => {
     if (trimmed.startsWith("/")) {
       const handled = await handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot });
       prompt();

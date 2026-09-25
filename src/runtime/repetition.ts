@@ -44,7 +44,8 @@ export const DEFAULT_GUARD_CONFIG: GuardConfig = {
 
 export class RepetitionGuard {
   private readonly attempts: AttemptRecord[] = [];
-  private consecutiveFailures = 0;
+  /** Per-tool consecutive-failure counters: one tool's storm must not lock out unrelated tools. */
+  private readonly consecutiveFailuresByTool = new Map<string, number>();
   private readonly config: GuardConfig;
 
   constructor(config: GuardConfig = DEFAULT_GUARD_CONFIG) {
@@ -52,7 +53,7 @@ export class RepetitionGuard {
   }
 
   /** Classify an incoming call BEFORE executing it. */
-  evaluate(key: string, fingerprint: string, now = Date.now()): GuardDecision {
+  evaluate(key: string, fingerprint: string, now = Date.now(), toolName = ""): GuardDecision {
     // Prune old attempts (10-minute horizon).
     const horizon = now - 600_000;
     while (this.attempts.length > 0 && this.attempts[0]!.t < horizon) this.attempts.shift();
@@ -75,11 +76,12 @@ export class RepetitionGuard {
         priorFailures: sameKey.filter((a) => !a.ok).length,
       };
     }
-    if (this.consecutiveFailures >= this.config.maxConsecutiveFailures) {
+    const consecutive = this.consecutiveFailuresByTool.get(toolName) ?? 0;
+    if (consecutive >= this.config.maxConsecutiveFailures) {
       return {
         verdict: "KNOWN_BAD_PATTERN",
-        reason: `${this.consecutiveFailures} consecutive tool failures — failure storm`,
-        priorFailures: this.consecutiveFailures,
+        reason: `${consecutive} consecutive ${toolName} failures — failure storm for this tool; other tools remain available. Stop retrying and report, or change approach materially.`,
+        priorFailures: consecutive,
       };
     }
     if (identical.length > 0) {
@@ -91,10 +93,19 @@ export class RepetitionGuard {
   }
 
   /** Record the outcome after execution. */
-  record(key: string, fingerprint: string, ok: boolean, errorCategory?: string, now = Date.now()): void {
+  record(key: string, fingerprint: string, ok: boolean, errorCategory?: string, now = Date.now(), toolName = ""): void {
     this.attempts.push({ key, fingerprint, ok, errorCategory, t: now });
-    if (ok) this.consecutiveFailures = 0;
-    else this.consecutiveFailures += 1;
+    const current = this.consecutiveFailuresByTool.get(toolName) ?? 0;
+    this.consecutiveFailuresByTool.set(toolName, ok ? 0 : current + 1);
+  }
+
+  /**
+   * Record a caller-mistake failure (bad arguments, unknown tool): it counts
+   * for identical-failure detection but must NOT feed the failure-storm
+   * breaker, which is reserved for environment/execution instability.
+   */
+  recordNonStorm(key: string, fingerprint: string, errorCategory: string, now = Date.now()): void {
+    this.attempts.push({ key, fingerprint, ok: false, errorCategory, t: now });
   }
 }
 

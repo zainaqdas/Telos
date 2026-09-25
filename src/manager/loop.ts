@@ -1,6 +1,7 @@
 import type { Provider, Message, Usage } from "../providers/types.ts";
 import { ProviderError, emptyUsage, addUsage } from "../providers/types.ts";
 import type { ToolRegistry, ToolExecContext } from "../tools/registry.ts";
+import { validateToolArgs } from "../tools/registry.ts";
 import type { BudgetEnforcer } from "../runtime/usage.ts";
 import { RepetitionGuard, fingerprintCall, guardKey, classifyShellFailure, DEFAULT_GUARD_CONFIG } from "../runtime/repetition.ts";
 import type { CancellationController } from "../runtime/cancellation.ts";
@@ -197,7 +198,15 @@ export class ManagerLoop {
     // ── Repetition Guard: classify BEFORE executing (Part 26) ──
     const key = guardKey(call.name, args);
     const fingerprint = await fingerprintCall(call.name, args, this.deps.ctx.root);
-    const decision = this.guard.evaluate(key, fingerprint);
+
+    const schemaCheck = validateToolArgs(args, tool.parameters);
+    if (!schemaCheck.ok) {
+      this.deps.events.append("tool_failed", { name: call.name, category: "bad_args", message: schemaCheck.error });
+      this.guard.recordNonStorm(key, fingerprint, "bad_args");
+      return { output: `tool ${call.name}: invalid arguments — ${schemaCheck.error}. Fix the arguments and try again.` };
+    }
+
+    const decision = this.guard.evaluate(key, fingerprint, Date.now(), call.name);
     if (decision.verdict === "REPEATED_FAILURE" || decision.verdict === "KNOWN_BAD_PATTERN") {
       this.deps.events.append("tool_failed", { name: call.name, category: decision.verdict, message: decision.reason });
       return {
@@ -216,12 +225,20 @@ export class ManagerLoop {
     try {
       result = await tool.execute(args, this.deps.ctx);
     } catch (err) {
-      result = { ok: false, output: `tool ${call.name} threw: ${(err as Error).message}`, errorCategory: "tool_threw" };
+      // Tool-internal mistakes (e.g. bad paths) are caller errors, not
+      // environment storms — they count for repetition, not for lockout.
+      const msg = (err as Error).message;
+      if (/escapes workspace|bad_args|invalid/i.test(msg)) {
+        this.deps.events.append("tool_failed", { name: call.name, category: "bad_args", message: msg });
+        this.guard.recordNonStorm(key, fingerprint, "bad_args");
+        return { output: `tool ${call.name}: ${msg}. Correct the arguments — do not retry unchanged.` };
+      }
+      result = { ok: false, output: `tool ${call.name} threw: ${msg}`, errorCategory: "tool_threw" };
     }
 
     if (result.ok) {
       this.deps.events.append("tool_completed", { name: call.name, bytes: result.output.length });
-      this.guard.record(key, fingerprint, true);
+      this.guard.record(key, fingerprint, true, undefined, Date.now(), call.name);
       // A workspace edit is runtime evidence that a "fix" checklist step happened.
       if (call.name === "edit_file" || call.name === "write_file") {
         this.satisfySkillRequirements("-fix", result.output.slice(0, 120), "tool:" + call.name);
@@ -233,7 +250,7 @@ export class ManagerLoop {
           ? classifyShellFailure(result.output, exitCode)
           : result.errorCategory ?? "tool_error";
       this.deps.events.append("tool_failed", { name: call.name, category, message: result.output.slice(0, 300) });
-      this.guard.record(key, fingerprint, false, category);
+      this.guard.record(key, fingerprint, false, category, Date.now(), call.name);
       // Failure learning hook (Part 28): candidate recorded; promotion comes in Phase 4.
       this.deps.events.append("lesson_candidate", { category, tool: call.name, observation: result.output.slice(0, 300) });
     }
