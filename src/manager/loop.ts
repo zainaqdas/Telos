@@ -318,9 +318,17 @@ export class ManagerLoop {
     const isBuild = /\b(build|tsc|compile)\b/.test(head);
     const isLint = /\b(lint|eslint|biome)\b/.test(head);
     const observation = output.slice(0, 200);
-    // False-green guard: an exit-0 test run that executed ZERO tests proves
-    // nothing (e.g. empty suite, wrong glob). Never treat it as verification.
-    const zeroTests = /(?:^|\n)\s*(?:ℹ )?tests? 0\b/i.test(output) || /no tests (?:found|ran)/i.test(output);
+    // False-green guard: an exit-0 test run reporting fewer than the
+    // configured minimum tests proves nothing (empty suite, wrong glob).
+    // min_test_count = 0 disables the guard.
+    const minTests = this.deps.config.runtime.minTestCount;
+    let zeroTests = false;
+    if (isTest && minTests > 0) {
+      const testsLine = output.match(/(?:^|\n)\s*(?:ℹ )?tests\s+(\d+)/i);
+      const count = testsLine ? Number(testsLine[1]) : null;
+      const noTestsMsg = /no tests (?:found|ran)/i.test(output);
+      zeroTests = noTestsMsg || count === null ? /node --test|vitest|jest|pytest|mocha/i.test(`${command}\n${output}`) && (count === 0 || noTestsMsg) : count < minTests;
+    }
     const effectiveOk = ok && !(isTest && zeroTests);
     if (isTest) {
       this.ensureRequirement("tests-pass", "Project tests pass", effectiveOk);

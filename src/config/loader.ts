@@ -57,6 +57,7 @@ export function loadConfig(projectRoot: string): SynergonConfig {
     ["maxTotalTokens", "SYNERGON_MAX_TOKENS"],
     ["maxToolCalls", "SYNERGON_MAX_TOOL_CALLS"],
     ["maxWallTimeSeconds", "SYNERGON_MAX_WALL_TIME"],
+    ["minTestCount", "SYNERGON_MIN_TEST_COUNT"],
   ];
   for (const [key, envName] of intOverrides) {
     const v = Number(env[envName]);
@@ -86,6 +87,7 @@ max_parallel_workers = 2
 max_wall_time_seconds = 900
 shell_timeout_seconds = 120
 max_stream_attempts = 2
+min_test_count = 1             # exit-0 test runs reporting fewer tests are not verification; 0 disables
 
 [security]
 confirm_destructive = true

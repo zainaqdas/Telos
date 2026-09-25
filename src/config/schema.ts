@@ -75,6 +75,8 @@ export interface RuntimeConfig {
   maxWallTimeSeconds: number;
   shellTimeoutSeconds: number;
   maxStreamAttempts: number;
+  /** Minimum tests a passing suite must report to count as verification (0 disables the guard). */
+  minTestCount: number;
 }
 
 export interface SecurityConfig {
@@ -113,6 +115,7 @@ export function parseConfig(root: Record<string, unknown>): SynergonConfig {
       maxWallTimeSeconds: expectInt(runtime["max_wall_time_seconds"], "runtime.max_wall_time_seconds", { min: 10, fallback: 900 }),
       shellTimeoutSeconds: expectInt(runtime["shell_timeout_seconds"], "runtime.shell_timeout_seconds", { min: 1, fallback: 120 }),
       maxStreamAttempts: expectInt(runtime["max_stream_attempts"], "runtime.max_stream_attempts", { min: 1, max: 5, fallback: 2 }),
+      minTestCount: expectInt(runtime["min_test_count"], "runtime.min_test_count", { min: 0, fallback: 1 }),
     },
     security: {
       confirmDestructive: expectBool(security["confirm_destructive"], "security.confirm_destructive", true),
