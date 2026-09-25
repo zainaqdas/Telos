@@ -13,6 +13,7 @@ import { CancellationController } from "../runtime/cancellation.ts";
 import { EventLog } from "../events/log.ts";
 import { CompletionGate } from "../gate/gate.ts";
 import { ManagerLoop } from "../manager/loop.ts";
+import { profileRepository } from "../context/profile.ts";
 
 /**
  * Interactive session (Part 60/62): terminal-native, minimal, no web UI.
@@ -59,6 +60,16 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   const gate = new CompletionGate(() => events.readAll());
   const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds });
+
+  // Context Engine (Phase 2): focused repo profile injected into the system prompt.
+  let repoProfile: string | undefined;
+  try {
+    const profile = await profileRepository(opts.projectRoot);
+    repoProfile = profile.profileText;
+  } catch {
+    repoProfile = undefined; // profiling must never block a session
+  }
+
   const manager = new ManagerLoop({
     provider,
     model: config.model.name,
@@ -69,6 +80,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     cancellation,
     ctx,
     gate,
+    repoProfile,
   });
 
   // ─── Terminal setup ─────────────────────────────────────────────────────────
@@ -145,7 +157,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       return;
     }
     if (trimmed.startsWith("/")) {
-      const handled = handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot });
+      const handled = await handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot });
       prompt();
       if (handled === "exit") shutdown(0);
       return;
@@ -178,7 +190,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
 // ─── Slash commands (Part 61) ─────────────────────────────────────────────────
 
-function handleSlashCommand(
+async function handleSlashCommand(
   line: string,
   deps: {
     config: SynergonConfig;
@@ -188,13 +200,23 @@ function handleSlashCommand(
     shutdown: (code: number) => void;
     projectRoot: string;
   },
-): "exit" | undefined {
+): Promise<"exit" | undefined> {
   const [cmd, ...args] = line.slice(1).split(/\s+/);
   switch (cmd) {
+    case "profile": {
+      try {
+        const p = await profileRepository(deps.projectRoot);
+        out(p.profileText);
+      } catch (err) {
+        out(`profile failed: ${(err as Error).message}`);
+      }
+      return;
+    }
     case "help":
       out([
         "/help            this text",
         "/status          budget usage, task state, model",
+        "/profile         repository profile (languages, commands, instructions)",
         "/diff            git diff of the workspace",
         "/cancel          cancel the running task",
         "/model           show configured model (change via config/env)",
