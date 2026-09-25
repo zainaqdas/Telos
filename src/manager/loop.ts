@@ -10,6 +10,7 @@ import { reduce } from "../events/state.ts";
 import type { CompletionGate, GateReport } from "../gate/gate.ts";
 import type { SynergonConfig } from "../config/schema.ts";
 import type { SkillRouter } from "../skills/router.ts";
+import { FailureLearner } from "../memory/pipeline.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 
 /**
@@ -30,6 +31,7 @@ export interface ManagerDeps {
   gate: CompletionGate;
   guard?: RepetitionGuard;
   skillRouter?: SkillRouter;
+  learner?: FailureLearner;
   repoProfile?: string;
 }
 
@@ -84,6 +86,23 @@ export class ManagerLoop {
     const isCorrection = opts.isCorrection === true;
     this.busy = true;
 
+    // Corrections are first-class: durable rule capture + rejection memory (Part 15/31).
+    if (isCorrection && this.deps.learner) {
+      try {
+        const negation = instruction.match(/\b(?:don't|do not|never|stop|no)\s+(?:use|using|add|write|touch|run)\s+([a-z0-9@/._-]+)/i);
+        const directive = instruction.match(/\b(?:use|always|prefer)\s+([a-z0-9@/._-]+(?:\s+[a-z0-9@/._-]+)?)/i);
+        if (negation) {
+          const approach = negation[1]!;
+          this.deps.learner.recordRejection(approach, `User correction: ${instruction.slice(0, 160)}`);
+          this.deps.learner.recordUserRule(`Do not use ${approach}.`);
+        } else if (directive) {
+          this.deps.learner.recordUserRule(`Prefer ${directive[1]}.`);
+        }
+      } catch {
+        /* rule capture must never break the run */
+      }
+    }
+
     // Deterministic skill routing (Part 34): runtime activates skills, the
     // model is informed but cannot skip or invent them.
     if (this.deps.skillRouter) {
@@ -96,6 +115,17 @@ export class ManagerLoop {
         }
       } catch {
         /* routing must never break the run */
+      }
+    }
+
+    // Memory retrieval (Part 32): capped, trust-ordered, never the archive.
+    if (this.deps.learner) {
+      try {
+        const memory = this.deps.learner.retrieveFor(instruction);
+        const formatted = this.deps.learner.formatForContext(memory);
+        if (formatted) this.pushSystemNotice(formatted);
+      } catch {
+        /* memory must never break the run */
       }
     }
     this.deps.events.append(isCorrection ? "user_correction" : "user_instruction", { text: instruction });
@@ -251,7 +281,19 @@ export class ManagerLoop {
           : result.errorCategory ?? "tool_error";
       this.deps.events.append("tool_failed", { name: call.name, category, message: result.output.slice(0, 300) });
       this.guard.record(key, fingerprint, false, category, Date.now(), call.name);
-      // Failure learning hook (Part 28): candidate recorded; promotion comes in Phase 4.
+      // Failure learning pipeline (Part 28): classify, record, promote on recurrence.
+      if (this.deps.learner) {
+        try {
+          const target = String(args["command"] ?? args["path"] ?? call.name);
+          const lesson = this.deps.learner.recordFailure({ tool: call.name, category, observation: result.output, target });
+          if (lesson) {
+            this.deps.events.append("lesson_verified", { key: lesson.key, statement: lesson.statement });
+            this.pushSystemNotice(`Runtime lesson learned (will persist): ${lesson.statement}`);
+          }
+        } catch {
+          /* learning must never break the run */
+        }
+      }
       this.deps.events.append("lesson_candidate", { category, tool: call.name, observation: result.output.slice(0, 300) });
     }
 

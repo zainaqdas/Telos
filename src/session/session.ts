@@ -17,6 +17,8 @@ import { profileRepository } from "../context/profile.ts";
 import { StreamPrinter, streamWidth } from "./stream-printer.ts";
 import { loadSkills } from "../skills/loader.ts";
 import { SkillRouter } from "../skills/router.ts";
+import { MemoryStore } from "../memory/store.ts";
+import { FailureLearner } from "../memory/pipeline.ts";
 
 /**
  * Interactive session (Part 60/62): terminal-native, minimal, no web UI.
@@ -79,6 +81,10 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   const skills = loadSkills(opts.projectRoot);
   const skillRouter = new SkillRouter({ skills, events, profile });
 
+  // Memory Engine (Phase 4): JSONL stores + failure learning pipeline.
+  const memoryStore = new MemoryStore(opts.projectRoot);
+  const learner = new FailureLearner(memoryStore);
+
   const manager = new ManagerLoop({
     provider,
     model: config.model.name,
@@ -90,6 +96,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     ctx,
     gate,
     skillRouter,
+    learner,
     repoProfile,
   });
 
@@ -210,7 +217,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   const processLine = async (trimmed: string): Promise<void> => {
     if (trimmed.startsWith("/")) {
-      const handled = await handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot });
+      const handled = await handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot, learnerStore: learner.store });
       prompt();
       if (handled === "exit") shutdown(0);
       return;
@@ -256,6 +263,7 @@ async function handleSlashCommand(
     manager: ManagerLoop;
     shutdown: (code: number) => void;
     projectRoot: string;
+    learnerStore: MemoryStore;
   },
 ): Promise<"exit" | undefined> {
   const [cmd, ...args] = line.slice(1).split(/\s+/);
@@ -267,6 +275,20 @@ async function handleSlashCommand(
       } catch (err) {
         out(`profile failed: ${(err as Error).message}`);
       }
+      return;
+    }
+    case "memory": {
+      const store = deps.learnerStore;
+      const c = store.counts();
+      out(
+        `memory: ${c.user_rule} rules · ${c.lesson} lessons · ${c.rejected_approach} rejected · ${c.fact} facts · ${c.decision} decisions · ${c.failure} failures\nlocation: .project-agent/memory/`,
+      );
+      const rules = store.all("user_rule");
+      if (rules.length) out("rules:\n" + rules.map((r) => `  - ${r.statement}`).join("\n"));
+      const lessons = store.all("lesson");
+      if (lessons.length) out("lessons:\n" + lessons.map((r) => `  - ${r.statement}`).join("\n"));
+      const rejected = store.all("rejected_approach");
+      if (rejected.length) out("rejected:\n" + rejected.map((r) => `  - ${r.key}${r.reason ? ` — ${r.reason}` : ""}`).join("\n"));
       return;
     }
     case "skills": {
@@ -288,6 +310,7 @@ async function handleSlashCommand(
         "/status          budget usage, task state, model",
         "/profile         repository profile (languages, commands, instructions)",
         "/skills          list loaded skills (source, checklist, constraints)",
+        "/memory          show durable memory (rules, lessons, rejected approaches)",
         "/diff            git diff of the workspace",
         "/cancel          cancel the running task",
         "/model           show configured model (change via config/env)",

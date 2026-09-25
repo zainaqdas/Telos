@@ -1,5 +1,28 @@
 # Synergon — Phase Reports
 
+## Phase 4 — Memory + Failure Learning
+
+**Implemented**
+
+- JSONL memory stores under `.project-agent/memory/` (facts, lessons, decisions, failures, rejected approaches, user rules) — no vector DB, no embeddings (Part 29)
+- `MemoryStore`: append with natural-key dedup (repeats reinforce via hit counts), torn-line tolerant reads, trust-hierarchy-ordered retrieval (user_rule > fact > lesson > decision > failure > rejected), topic-gated scoring over statement/cause/correction/reason fields, hard result cap (Parts 30–32)
+- Deterministic failure-learning pipeline: category → root-cause map (port in use, missing module, path, network, test failure, …) → failure record → **promotion to a verified lesson only on recurrence** (single occurrences stay failures) (Parts 27–28)
+- Lesson shape: observation → cause → correction → verification — never a bare "command failed"
+- Explicit rejected-approach memory with `revisit_if`; retrieval warns against silent resurrection (Part 31)
+- User corrections captured as durable user rules and rejections (trust hierarchy top) (Parts 15, 32)
+- Loop integration: capped memory injected into instructions by relevance; recurring failures emit `lesson_verified` events and a runtime notice; nothing model-stated is ever written as memory by the model itself
+- `/memory` command listing rules, lessons, rejected approaches
+
+**Tested** — dedup + cross-instance persistence, trust ordering and topic gating and caps, deterministic cause classification, promotion-on-recurrence (and non-promotion on first failure), rejection/rule retrieval, correction → rule+rejection capture through the loop, lesson promotion across two loop runs with `lesson_verified` event, memory injection into the transcript.
+
+**Verified** — 58/58 tests, strict typecheck clean.
+
+**Failed / learned** — the retrieval haystack initially omitted `reason`/`revisitIf`/`verification` fields, making rejection reasons unsearchable (test caught it). Dedup hit-marking required a file rewrite: implemented as append-to-temp + rename to keep writes atomic.
+
+**Remaining** — retrieval-weight tuning from real workloads, lesson expiry/decay, context compaction integration (Part 68, later phase).
+
+**Architecture changes** — none: memory is a side-store consumed at instruction boundaries; the event log remains the sole authority for task state. Lessons are promoted only from recurrence of *observed* failures, so hallucinated lessons cannot enter memory through this path.
+
 ## Phase 3 — Skill Engine
 
 **Implemented**
