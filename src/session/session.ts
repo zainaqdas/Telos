@@ -1,0 +1,260 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { loadConfig, STATE_DIRNAME } from "../config/loader.ts";
+import type { SynergonConfig } from "../config/schema.ts";
+import { createProvider, resolveApiKey } from "../providers/index.ts";
+import { ToolRegistry } from "../tools/registry.ts";
+import { registerFilesystemTools } from "../tools/fs-tools.ts";
+import { registerShellTools } from "../tools/shell-tools.ts";
+import { makeContext, installSecret } from "../tools/util.ts";
+import { BudgetEnforcer, type BudgetLimits } from "../runtime/usage.ts";
+import { CancellationController } from "../runtime/cancellation.ts";
+import { EventLog } from "../events/log.ts";
+import { CompletionGate } from "../gate/gate.ts";
+import { ManagerLoop } from "../manager/loop.ts";
+
+/**
+ * Interactive session (Part 60/62): terminal-native, minimal, no web UI.
+ * The user stays boss: interrupt (Ctrl+C), correct mid-flight, inspect state,
+ * inspect diff, stop. Slash commands map 1:1 to real operations.
+ */
+
+interface SessionOpts {
+  projectRoot: string;
+  resume?: boolean;
+}
+
+export async function runSession(opts: SessionOpts): Promise<number> {
+  const config = loadConfig(opts.projectRoot);
+  const stateDir = join(opts.projectRoot, STATE_DIRNAME);
+  mkdirSync(join(stateDir, "events"), { recursive: true });
+
+  const apiKey = resolveApiKey(config.model.apiKeyEnv);
+  installSecret(apiKey);
+  const provider = createProvider({ provider: config.model.provider, apiKey, baseUrl: config.model.baseUrl });
+
+  const registry = new ToolRegistry();
+  registerFilesystemTools(registry);
+  const cancellation = new CancellationController();
+  registerShellTools(registry, { cancellation });
+
+  const taskId = `t-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
+  const events = new EventLog(join(stateDir, "events"), taskId);
+  const limits: BudgetLimits = {
+    maxTotalTokens: config.runtime.maxTotalTokens,
+    maxToolCalls: config.runtime.maxToolCalls,
+    maxWorkerSpawns: config.runtime.maxWorkerSpawns,
+    maxParallelWorkers: config.runtime.maxParallelWorkers,
+    maxWallTimeSeconds: config.runtime.maxWallTimeSeconds,
+  };
+  const budget = new BudgetEnforcer(limits);
+  events.append("task_started", { title: "interactive session", limits: {
+    max_total_tokens: limits.maxTotalTokens,
+    max_tool_calls: limits.maxToolCalls,
+    max_worker_spawns: limits.maxWorkerSpawns,
+    max_parallel_workers: limits.maxParallelWorkers,
+    max_wall_time_seconds: limits.maxWallTimeSeconds,
+  } });
+
+  const gate = new CompletionGate(() => events.readAll());
+  const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds });
+  const manager = new ManagerLoop({
+    provider,
+    model: config.model.name,
+    config,
+    registry,
+    events,
+    budget,
+    cancellation,
+    ctx,
+    gate,
+  });
+
+  // ─── Terminal setup ─────────────────────────────────────────────────────────
+  const stdin = process.stdin;
+  const isRawSupported = stdin.isTTY === true;
+  if (isRawSupported) {
+    stdin.setRawMode(true);
+  }
+  let lineBuffer = "";
+  let rendering = false;
+
+  printBanner(config, taskId);
+  renderBudgetBar(budget);
+
+  const prompt = (): void => {
+    process.stdout.write(`\n> `);
+  };
+  prompt();
+
+  const onKeypress = (buf: Buffer): void => {
+    for (const byte of buf) {
+      if (byte === 0x03) {
+        // Ctrl+C: cancel the running task first; exit if idle or pressed twice.
+        if (manager.isBusy()) {
+          cancellation.cancel("user pressed Ctrl+C");
+          out("\n[cancellation signal sent — terminating task and child processes]");
+        } else if (lineBuffer.length > 0) {
+          lineBuffer = "";
+          out("\n[cleared]");
+          prompt();
+        } else {
+          shutdown(0);
+        }
+        return;
+      }
+      if (byte === 0x04) {
+        shutdown(0);
+        return;
+      }
+      if (byte === 0x0d || byte === 0x0a) {
+        const line = lineBuffer;
+        lineBuffer = "";
+        out("");
+        void handleLine(line);
+        return;
+      }
+      if (byte === 0x7f || byte === 0x08) {
+        if (lineBuffer.length > 0) lineBuffer = lineBuffer.slice(0, -1);
+        continue;
+      }
+      if (byte < 0x20) continue;
+      lineBuffer += String.fromCharCode(byte);
+    }
+    if (!rendering) {
+      process.stdout.write(`\r> ${lineBuffer}`);
+    }
+  };
+
+  stdin.on("data", onKeypress);
+
+  const shutdown = (code: number): void => {
+    if (isRawSupported) stdin.setRawMode(false);
+    stdin.removeListener("data", onKeypress);
+    cancellation.cancel("session shutdown");
+    events.append("task_cancelled", { reason: "session ended" });
+    out(`\nevent log: ${events.file}`);
+    process.exit(code);
+  };
+
+  const handleLine = async (line: string): Promise<void> => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      prompt();
+      return;
+    }
+    if (trimmed.startsWith("/")) {
+      const handled = handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot });
+      prompt();
+      if (handled === "exit") shutdown(0);
+      return;
+    }
+
+    rendering = true;
+    const started = Date.now();
+    try {
+      const result = await manager.run(trimmed, {
+        onText: (delta) => out(delta),
+        onTool: (name, summary) => out(`\n  ⚙ ${name}  ${summary}`),
+      });
+      const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+      out(`\n[${result.status} in ${elapsed}s]`);
+      if (result.gate) out(`Gate: ${result.gate.verdict} — ${result.gate.summary}`);
+      if (result.detail) out(`detail: ${result.detail}`);
+      renderBudgetBar(budget);
+    } catch (err) {
+      out(`\nerror: ${(err as Error).message}`);
+    } finally {
+      rendering = false;
+      prompt();
+    }
+  };
+
+  // Keep the process alive while idle (Ctrl+C or /exit terminates).
+  await new Promise<never>(() => undefined);
+  return 0; // unreachable
+}
+
+// ─── Slash commands (Part 61) ─────────────────────────────────────────────────
+
+function handleSlashCommand(
+  line: string,
+  deps: {
+    config: SynergonConfig;
+    budget: BudgetEnforcer;
+    events: EventLog;
+    manager: ManagerLoop;
+    shutdown: (code: number) => void;
+    projectRoot: string;
+  },
+): "exit" | undefined {
+  const [cmd, ...args] = line.slice(1).split(/\s+/);
+  switch (cmd) {
+    case "help":
+      out([
+        "/help            this text",
+        "/status          budget usage, task state, model",
+        "/diff            git diff of the workspace",
+        "/cancel          cancel the running task",
+        "/model           show configured model (change via config/env)",
+        "/exit            quit Synergon",
+      ].join("\n"));
+      return;
+    case "status": {
+      const u = deps.budget.used;
+      const l = deps.budget.limitsValue;
+      out([
+        `model      ${deps.config.model.provider}/${deps.config.model.name}`,
+        `tokens     ${u.tokens} / ${l.maxTotalTokens}`,
+        `tool calls ${u.toolCalls} / ${l.maxToolCalls}`,
+        `workers    ${u.workersSpawned} / ${l.maxWorkerSpawns} (parallel ${u.runningWorkers}/${l.maxParallelWorkers})`,
+        `wall time  ${Math.round((Date.now() - u.startedAt) / 1000)}s / ${l.maxWallTimeSeconds}s`,
+      ].join("\n"));
+      return;
+    }
+    case "diff": {
+      const res = spawnSync("git", ["--no-pager", "diff", "--stat"], { cwd: deps.projectRoot, encoding: "utf8" });
+      out(res.stdout || "(no unstaged changes)");
+      return;
+    }
+    case "cancel":
+      deps.manager.requestCancel();
+      out("[cancel requested]");
+      return;
+    case "model":
+      out(`${deps.config.model.provider} / ${deps.config.model.name || "(unset)"}`);
+      return;
+    case "exit":
+    case "quit":
+      return "exit";
+    default:
+      out(`unknown command: /${cmd} — try /help`);
+      return;
+  }
+}
+
+// ─── Output helpers ───────────────────────────────────────────────────────────
+
+function out(text: string): void {
+  process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+}
+
+function printBanner(config: SynergonConfig, taskId: string): void {
+  const keyEnv = config.model.apiKeyEnv;
+  const hasKey = Boolean(process.env[keyEnv]);
+  out([
+    `Synergon — ${config.model.provider}/${config.model.name || "(model unset)"}  [${keyEnv}: ${hasKey ? "present" : "MISSING"}]`,
+    `task ${taskId}`,
+    `budgets: ${config.runtime.maxTotalTokens} tokens · ${config.runtime.maxToolCalls} tool calls · ${config.runtime.maxWallTimeSeconds}s wall`,
+    `Ctrl+C cancels the running task · Ctrl+C again exits · /help for commands`,
+  ].join("\n"));
+}
+
+function renderBudgetBar(budget: BudgetEnforcer): void {
+  const u = budget.used;
+  const l = budget.limitsValue;
+  const tokPct = Math.min(100, Math.round((u.tokens / Math.max(1, l.maxTotalTokens)) * 100));
+  const toolPct = Math.min(100, Math.round((u.toolCalls / Math.max(1, l.maxToolCalls)) * 100));
+  out(`budget: tokens ${u.tokens}/${l.maxTotalTokens} (${tokPct}%) · tools ${u.toolCalls}/${l.maxToolCalls} (${toolPct}%)`);
+}

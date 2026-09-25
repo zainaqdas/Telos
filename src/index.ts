@@ -91,7 +91,7 @@ function cmdInit(): void {
   console.log(`wrote ${cfg}`);
 }
 
-function main(): number {
+async function main(): Promise<number> {
   const { command, args, flags } = parseArgs(process.argv.slice(2));
 
   const applyFlagOverrides = (): void => {
@@ -129,8 +129,8 @@ function main(): number {
           console.error("No model configured. Set SYNERGON_MODEL or [model] name in .project-agent/config.toml.");
           return 2;
         }
-        console.error("interactive session: not yet implemented (Phase 1)");
-        return 3;
+        const { runSession } = await import("./session/session.ts");
+        return await runSession({ projectRoot: process.cwd() });
       }
       default:
         console.error(`Unknown command: ${command}\n`);
@@ -147,4 +147,12 @@ function main(): number {
   }
 }
 
-process.exitCode = main();
+void main().then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (err) => {
+    console.error(`fatal: ${err instanceof Error ? err.message : String(err)}`);
+    process.exitCode = 1;
+  },
+);

@@ -1,0 +1,277 @@
+import type { Provider, Message, Usage } from "../providers/types.ts";
+import { ProviderError, emptyUsage, addUsage } from "../providers/types.ts";
+import type { ToolRegistry, ToolExecContext } from "../tools/registry.ts";
+import type { BudgetEnforcer } from "../runtime/usage.ts";
+import { RepetitionGuard, fingerprintCall, guardKey, classifyShellFailure, DEFAULT_GUARD_CONFIG } from "../runtime/repetition.ts";
+import type { CancellationController } from "../runtime/cancellation.ts";
+import type { EventLog } from "../events/log.ts";
+import { reduce } from "../events/state.ts";
+import type { CompletionGate, GateReport } from "../gate/gate.ts";
+import type { SynergonConfig } from "../config/schema.ts";
+import { buildSystemPrompt } from "./system-prompt.ts";
+
+/**
+ * The Manager task loop (Part 86). One persistent Manager drives model calls,
+ * executes tools, enforces runtime guards, and records every meaningful fact
+ * as an event. Workers arrive in Phase 5–6; this loop is useful without them.
+ */
+
+export interface ManagerDeps {
+  provider: Provider;
+  model: string;
+  config: SynergonConfig;
+  registry: ToolRegistry;
+  events: EventLog;
+  budget: BudgetEnforcer;
+  cancellation: CancellationController;
+  ctx: ToolExecContext;
+  gate: CompletionGate;
+  guard?: RepetitionGuard;
+  repoProfile?: string;
+}
+
+export interface RunOptions {
+  isCorrection?: boolean;
+  /** Live UI hooks (streaming deltas, tool activity). */
+  onText?: (delta: string) => void;
+  onTool?: (name: string, argsSummary: string) => void;
+}
+
+export interface RunResult {
+  status: "completed" | "incomplete" | "blocked" | "budget_exceeded" | "cancelled" | "provider_error";
+  gate: GateReport | null;
+  usage: Usage;
+  assistantText: string;
+  detail?: string;
+}
+
+const MAX_TOOL_OUTPUT_IN_TRANSCRIPT = 8_000;
+
+interface PendingToolCall {
+  id: string;
+  name: string;
+  argumentsJson: string;
+}
+
+export class ManagerLoop {
+  private readonly messages: Message[] = [];
+  private readonly guard: RepetitionGuard;
+  private readonly deps: ManagerDeps;
+  private usage: Usage = emptyUsage();
+  private busy = false;
+
+  constructor(deps: ManagerDeps) {
+    this.deps = deps;
+    this.guard = deps.guard ?? new RepetitionGuard(DEFAULT_GUARD_CONFIG);
+    this.messages.push({ role: "system", parts: [{ type: "text", text: buildSystemPrompt(deps.config, deps.repoProfile) }] });
+  }
+
+  /** True while a run() is driving the model/tools. */
+  isBusy(): boolean {
+    return this.busy;
+  }
+
+  /** Request cooperative cancellation of the current run. */
+  requestCancel(): void {
+    this.deps.cancellation.cancel("user requested cancellation");
+  }
+
+  /** Run the loop for one user instruction until the Gate rules or limits hit. */
+  async run(instruction: string, opts: RunOptions = {}): Promise<RunResult> {
+    const isCorrection = opts.isCorrection === true;
+    this.busy = true;
+    this.deps.events.append(isCorrection ? "user_correction" : "user_instruction", { text: instruction });
+    const prefix = isCorrection ? "CORRECTION — highest priority, supersedes earlier instructions where they conflict: " : "";
+    this.messages.push({ role: "user", parts: [{ type: "text", text: `${prefix}${instruction}` }] });
+
+    let assistantText = "";
+
+    while (true) {
+      if (this.deps.cancellation.isCancelled) return this.finish("cancelled", assistantText);
+
+      // ── Hard budget gate: the runtime decides, not the model (Part 23) ──
+      const modelVerdict = this.deps.budget.check("model_call");
+      if (!modelVerdict.allowed) {
+        this.deps.events.append("budget_exceeded", { resource: modelVerdict.resource, message: modelVerdict.message });
+        return { ...this.finish("budget_exceeded", assistantText), detail: modelVerdict.message };
+      }
+
+      // ── Stream one model turn ──
+      let text = "";
+      let turnUsage: Usage | undefined;
+      let stopReason = "";
+      const toolCalls: PendingToolCall[] = [];
+      try {
+        const stream = this.deps.provider.stream(
+          { messages: this.messages, tools: this.deps.registry.specs(), signal: this.deps.cancellation.signal },
+          this.deps.model,
+        );
+        for await (const chunk of stream) {
+          if (chunk.type === "text_delta" && chunk.text) {
+            text += chunk.text;
+            opts.onText?.(chunk.text);
+          } else if (chunk.type === "tool_call_delta" && chunk.toolCall) toolCalls.push(chunk.toolCall);
+          else if (chunk.type === "usage" && chunk.usage) turnUsage = chunk.usage;
+          else if (chunk.type === "finish") stopReason = chunk.stopReason ?? "";
+        }
+      } catch (err) {
+        if (this.deps.cancellation.isCancelled || (err as Error).name === "AbortError") {
+          return this.finish("cancelled", assistantText);
+        }
+        if (err instanceof ProviderError && err.retryable) {
+          await sleep(500); // basic error recovery: single retry, backoff
+          continue;
+        }
+        this.deps.events.append("failure", { source: "provider", message: (err as Error).message });
+        return { ...this.finish("provider_error", assistantText), detail: (err as Error).message };
+      }
+
+      if (turnUsage) {
+        this.deps.budget.recordUsage(turnUsage);
+        this.usage = addUsage(this.usage, turnUsage);
+      }
+      if (text) assistantText = text;
+      void stopReason;
+
+      if (toolCalls.length === 0) {
+        // Model finished its turn with prose — the Gate decides what happens.
+        const gate = this.deps.gate.evaluate();
+        if (gate.verdict === "COMPLETE") this.deps.events.append("task_completed", { reason: "gate_complete" });
+        const status: RunResult["status"] = gate.verdict === "COMPLETE" ? "completed" : gate.verdict === "BLOCKED" ? "blocked" : "incomplete";
+        return this.finish(status, assistantText, gate);
+      }
+
+      this.messages.push({
+        role: "assistant",
+        parts: [{ type: "text", text }],
+        toolCalls: toolCalls.map((tc) => ({ id: tc.id, name: tc.name, argumentsJson: tc.argumentsJson })),
+      });
+
+      for (const call of toolCalls) {
+        if (this.deps.cancellation.isCancelled) return this.finish("cancelled", assistantText);
+
+        const toolVerdict = this.deps.budget.check("tool_call");
+        if (!toolVerdict.allowed) {
+          this.deps.events.append("budget_exceeded", { resource: toolVerdict.resource, message: toolVerdict.message });
+          this.pushToolResult(call.id, call.name, `BUDGET EXCEEDED: ${toolVerdict.message}. No further tool calls are allowed this task.`);
+          return { ...this.finish("budget_exceeded", assistantText), detail: toolVerdict.message };
+        }
+
+        const result = await this.executeTool(call);
+        opts.onTool?.(call.name, result.output.split("\n")[0]?.slice(0, 100) ?? "");
+        this.pushToolResult(call.id, call.name, result.output);
+      }
+    }
+  }
+
+  // ─── Tool execution with repetition guard interception ──────────────────────
+
+  private async executeTool(call: PendingToolCall): Promise<{ output: string }> {
+    const tool = this.deps.registry.get(call.name);
+    if (!tool) return { output: `unknown tool: ${call.name}. Available: ${this.deps.registry.names().join(", ")}` };
+
+    let args: Record<string, unknown> = {};
+    try {
+      args = call.argumentsJson.trim() ? (JSON.parse(call.argumentsJson) as Record<string, unknown>) : {};
+    } catch {
+      return { output: `tool ${call.name}: arguments are not valid JSON: ${call.argumentsJson.slice(0, 200)}` };
+    }
+
+    // ── Repetition Guard: classify BEFORE executing (Part 26) ──
+    const key = guardKey(call.name, args);
+    const fingerprint = await fingerprintCall(call.name, args, this.deps.ctx.root);
+    const decision = this.guard.evaluate(key, fingerprint);
+    if (decision.verdict === "REPEATED_FAILURE" || decision.verdict === "KNOWN_BAD_PATTERN") {
+      this.deps.events.append("tool_failed", { name: call.name, category: decision.verdict, message: decision.reason });
+      return {
+        output: `REPETITION GUARD: ${decision.verdict} — ${decision.reason}. Do not repeat this call unchanged. Change something material (code, command, or state) first, or stop and report.`,
+      };
+    }
+
+    this.deps.budget.record("tool_call");
+    this.deps.events.append("tool_started", { name: call.name, args_summary: summarizeArgs(args) });
+
+    let result;
+    try {
+      result = await tool.execute(args, this.deps.ctx);
+    } catch (err) {
+      result = { ok: false, output: `tool ${call.name} threw: ${(err as Error).message}`, errorCategory: "tool_threw" };
+    }
+
+    if (result.ok) {
+      this.deps.events.append("tool_completed", { name: call.name, bytes: result.output.length });
+      this.guard.record(key, fingerprint, true);
+    } else {
+      const exitCode = result.meta?.["exitCode"];
+      const category =
+        call.name === "run_shell" && typeof exitCode === "number" && exitCode !== 0
+          ? classifyShellFailure(result.output, exitCode)
+          : result.errorCategory ?? "tool_error";
+      this.deps.events.append("tool_failed", { name: call.name, category, message: result.output.slice(0, 300) });
+      this.guard.record(key, fingerprint, false, category);
+      // Failure learning hook (Part 28): candidate recorded; promotion comes in Phase 4.
+      this.deps.events.append("lesson_candidate", { category, tool: call.name, observation: result.output.slice(0, 300) });
+    }
+
+    this.recordVerification(call.name, result.ok, result.output);
+    return { output: truncateForTranscript(result.output) };
+  }
+
+  /** Record test/build/lint shell results as verification events (gate inputs).
+   *  The runtime — not the model — derives requirements from these results:
+   *  a passing suite creates+satisfies "tests-pass"; a failing one invalidates it. */
+  private recordVerification(toolName: string, ok: boolean, output: string): void {
+    if (toolName !== "run_shell") return;
+    const head = output.slice(0, 4000).toLowerCase();
+    const isTest = /\b(test|vitest|jest|node --test|mocha|pytest|cargo test)\b/.test(head) || head.includes("# pass");
+    const isBuild = /\b(build|tsc|compile)\b/.test(head);
+    const isLint = /\b(lint|eslint|biome)\b/.test(head);
+    const observation = output.slice(0, 200);
+    if (isTest) {
+      this.ensureRequirement("tests-pass", "Project tests pass", ok);
+      this.deps.events.append("test_result", { ok, observation });
+    } else if (isBuild) {
+      this.ensureRequirement("build-pass", "Project build succeeds", ok);
+      this.deps.events.append("verification_result", { kind: "build", ok, observation });
+    } else if (isLint) {
+      this.ensureRequirement("lint-pass", "Lint passes", ok);
+      this.deps.events.append("verification_result", { kind: "lint", ok, observation });
+    }
+  }
+
+  /** Create a requirement on first sight; satisfy on success, invalidate on failure. */
+  private ensureRequirement(id: string, description: string, ok: boolean): void {
+    const state = reduce(this.deps.events.readAll());
+    const existing = state.requirements.get(id);
+    if (!existing) this.deps.events.append("requirement_added", { id, description, required: true });
+    if (ok) this.deps.events.append("requirement_satisfied", { id, source: "tool:run_shell", producer: "runtime", observation: "verification command succeeded" });
+    else this.deps.events.append("requirement_invalidated", { id, reason: "verification command failed" });
+  }
+
+  private pushToolResult(id: string, name: string, output: string): void {
+    this.messages.push({ role: "tool", parts: [{ type: "text", text: output }], toolCallId: id, toolName: name });
+  }
+
+  private finish(status: RunResult["status"], assistantText: string, gate: GateReport | null = null): RunResult {
+    this.busy = false;
+    return { status, gate, usage: this.usage, assistantText };
+  }
+}
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+
+function truncateForTranscript(text: string): string {
+  if (text.length <= MAX_TOOL_OUTPUT_IN_TRANSCRIPT) return text;
+  return `${text.slice(0, MAX_TOOL_OUTPUT_IN_TRANSCRIPT)}\n… [truncated for transcript]`;
+}
+
+function summarizeArgs(args: Record<string, unknown>): string {
+  return Object.entries(args)
+    .map(([k, v]) => `${k}=${typeof v === "string" ? (v.length > 60 ? `${v.slice(0, 60)}…` : v) : JSON.stringify(v)}`)
+    .join(" ")
+    .slice(0, 200);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
