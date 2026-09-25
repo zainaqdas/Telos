@@ -22,6 +22,32 @@ npx synergon chat
 
 Works with any OpenAI-compatible endpoint (`SYNERGON_BASE_URL`), including OpenRouter, Ollama, and vLLM.
 
+## Architecture
+
+```
+CLI (src/index.ts)
+  ↓
+Session (src/session)               terminal-native UI, slash commands, Ctrl+C
+  ↓
+ManagerLoop (src/manager)           persistent builder: model turns + tool execution
+  ├─→ ToolRegistry (src/tools)      declared permissions/risk, schema validation
+  │    ├─ filesystem · shell · git  built-in tools
+  │    └─ delegate                  spawns scoped, budget-gated workers
+  ├─→ Orchestrator (src/workers)    explorer · researcher · reviewer · qa
+  │    ├─ scoped registry views     workers are read-only; single-writer holds
+  │    └─ reports → findings/objections (advisory to the Manager)
+  ├─→ SkillRouter (src/skills)      deterministic routing; enforced checklists/constraints
+  ├─→ FailureLearner (src/memory)   JSONL stores · lessons · rejected approaches
+  ├─→ Provider (src/providers)      one OpenAI-compatible streaming path
+  └─→ Guards (src/runtime)          BudgetEnforcer · RepetitionGuard · Cancellation
+        ↓
+CompletionGate (src/gate)           single completion authority
+        ↓
+EventLog (JSONL) → reducer → TeamState    (authoritative, append-only)
+```
+
+The Manager is the primary builder: it plans, edits, runs, and verifies. Workers are task-scoped, read-only specialists it can consult through the budget-enforced `delegate` tool — their findings and objections are advisory input, never writes.
+
 ## Highlights
 
 - **Hard budgets** — tokens, tool calls, workers, wall clock. Enforced before every spend; never silently exceeded.
