@@ -17,6 +17,7 @@ import { MemoryStore } from "../src/memory/store.ts";
 import { FailureLearner } from "../src/memory/pipeline.ts";
 import { Orchestrator } from "../src/workers/orchestrator.ts";
 import { evaluateObjection, formatReportForManager, parseWorkerReport } from "../src/workers/roles.ts";
+import { CompletionGate } from "../src/gate/gate.ts";
 import type { SynergonConfig } from "../src/config/schema.ts";
 
 /** Scripted provider: each stream call consumes the next turn and records the prompts it saw. */
@@ -210,7 +211,7 @@ test("objection debate: preference-only objections are dismissed by a correction
   assert.equal(d.verdict, "dismissed");
 });
 
-test("correction propagation runs the debate once per prior objection", async () => {
+test("correction propagation runs the debate once per prior objection and records the verdict", async () => {
   const dir = mkdtempSync(join(tmpdir(), "syn-c5-"));
   try {
     const provider = new ScriptedProvider([
@@ -222,9 +223,14 @@ test("correction propagation runs the debate once per prior objection", async ()
     const notices = events.readAll().filter((e) => e.kind === "task_updated" && String(e.data["notice"] ?? "").includes("OBJECTION DEBATE"));
     assert.equal(notices.length, 1);
     assert.match(String(notices[0]?.data["notice"]), /needs_decision/);
+    // The verdict is a first-class event attached to the objection's id.
+    const debated = events.readAll().filter((e) => e.kind === "objection_debated");
+    assert.equal(debated.length, 1);
+    assert.equal(debated[0]?.data["id"], "obj-1");
+    assert.equal((debated[0]?.data["debate"] as { verdict: string }).verdict, "needs_decision");
     // Second propagation: the same objection is not re-debated.
     await orchestrator.propagateCorrection("correction number two");
-    assert.equal(events.readAll().filter((e) => e.kind === "task_updated" && String(e.data["notice"] ?? "").includes("OBJECTION DEBATE")).length, 1);
+    assert.equal(events.readAll().filter((e) => e.kind === "objection_debated").length, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -301,6 +307,103 @@ test("write tools are stripped from the manager registry while a worker runs, th
     const res = await edit.execute({ path: "code.ts", old_string: "1", new_string: "2" }, makeContext(dir, { shellTimeoutSeconds: 15 }));
     assert.ok(res.ok);
     assert.equal(readFileSync(join(dir, "code.ts"), "utf8"), "export const v = 2;\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── Gate integration: blockers + needs_decision objections → BLOCKED ──────
+
+test("gate stays COMPLETE with no collaboration state (regression guard)", () => {
+  const gate = new CompletionGate(() => [ev(1, "task_started", { title: "x" })]);
+  const report = gate.evaluate();
+  assert.equal(report.verdict, "COMPLETE");
+});
+
+test("gate BLOCKED on open blocker; decision unblocks", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-c10-"));
+  try {
+    const provider = new ScriptedProvider([[{ type: "text_delta", text: "FINDING: x\nBLOCKER: staging db not reachable" }]]);
+    const { events, orchestrator } = setup(dir, provider);
+    await orchestrator.runDelegation({ role: "explorer", question: "check the staging integration" });
+
+    const gate = new CompletionGate(() => events.readAll());
+    const before = gate.evaluate();
+    assert.equal(before.verdict, "BLOCKED");
+    assert.ok(before.summary.includes("open blocker b-1"), `summary must name the blocker: ${before.summary}`);
+    assert.ok(before.summary.includes("staging db not reachable"));
+
+    orchestrator.recordDecision("resolves b-1: staging db moved to the read replica");
+    const after = gate.evaluate();
+    assert.equal(after.verdict, "COMPLETE");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("gate BLOCKED on needs_decision objection; resolving decision unblocks; dismissed does not block", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-c11-"));
+  try {
+    const provider = new ScriptedProvider([[{ type: "text_delta", text: "FINDING: x\nOBJECTION: this rewrite risks data loss during migration" }]]);
+    const { events, orchestrator } = setup(dir, provider);
+    await orchestrator.runDelegation({ role: "reviewer", question: "review the rewrite plan" });
+    await orchestrator.propagateCorrection("use plain functions instead");
+
+    const gate = new CompletionGate(() => events.readAll());
+    const blocked = gate.evaluate();
+    assert.equal(blocked.verdict, "BLOCKED");
+    assert.ok(blocked.summary.includes("awaits a decision"), `summary must name the undecided objection: ${blocked.summary}`);
+
+    // A dismissed objection never blocks.
+    const { verdict } = evaluateObjection("I prefer the factory pattern", "keep it simple, no classes");
+    assert.equal(verdict, "dismissed");
+
+    // A decision that names the objection clears it and the gate.
+    orchestrator.recordDecision("resolves obj-1: migration runs behind the feature flag, data loss reviewed");
+    assert.equal(gate.evaluate().verdict, "COMPLETE");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy no-id objection is still resolvable by statement and can block the gate", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-c12-"));
+  try {
+    const provider = new ScriptedProvider([[{ type: "text_delta", text: "FINDING: x" }]]);
+    const { events, orchestrator } = setup(dir, provider);
+    // Legacy log shape: objection without an id, debate matched by statement.
+    events.append("objection", { statement: "this risks data loss", raised_by: "reviewer:w1" });
+    events.append("objection_debated", { statement: "this risks data loss", debate: { verdict: "needs_decision", rationale: "risk term" } });
+
+    const gate = new CompletionGate(() => events.readAll());
+    const blocked = gate.evaluate();
+    assert.equal(blocked.verdict, "BLOCKED");
+    assert.ok(blocked.summary.includes("(legacy)"), `legacy objection surfaced: ${blocked.summary}`);
+
+    const n = orchestrator.recordDecision("this risks data loss — mitigated by the dry-run mode");
+    assert.equal(n, 1, "statement-level resolution for legacy objection");
+    assert.equal(gate.evaluate().verdict, "COMPLETE");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("one decision can resolve a blocker and an objection together", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-c13-"));
+  try {
+    const provider = new ScriptedProvider([[
+      { type: "text_delta", text: "FINDING: x\nBLOCKER: credentials missing\nOBJECTION: bypassing the api risks a security regression" },
+    ]]);
+    const { events, orchestrator } = setup(dir, provider);
+    await orchestrator.runDelegation({ role: "reviewer", question: "review the integration shortcut" });
+    await orchestrator.propagateCorrection("ship the shortcut behind the flag");
+
+    const gate = new CompletionGate(() => events.readAll());
+    assert.equal(gate.evaluate().verdict, "BLOCKED");
+
+    const resolved = orchestrator.recordDecision("resolves b-1 and obj-1: credentials provisioned, shortcut confined to the flag");
+    assert.equal(resolved, 2);
+    assert.equal(gate.evaluate().verdict, "COMPLETE");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

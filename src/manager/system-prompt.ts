@@ -33,6 +33,7 @@ export function buildSystemPrompt(config: SynergonConfig, repoProfile?: string):
     "- While workers run in parallel your write tools are stripped — integrate reports, then edit when the workspace is yours again.",
     "- After a user correction, waiting workers are re-briefed automatically and their stale proposals are marked needs_rework. Do not act on pre-correction proposals without re-validating them.",
     "- When a worker objection conflicts with a correction or another objection, resolve it with the decision tool (record what was decided and why) or surface it to the user. Do not silently drop an objection.",
+    "- Open blockers and objections awaiting a decision keep the Completion Gate at BLOCKED. Reference them by id in a decision (e.g. 'resolves b-1' or 'resolves obj-2: why it is safe') to clear the path.",
   ];
   if (repoProfile) {
     lines.push("", "REPOSITORY CONTEXT", repoProfile);

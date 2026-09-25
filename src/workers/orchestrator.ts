@@ -74,9 +74,10 @@ export class Orchestrator {
   private workerSeq = 0;
   /** Task-scoped worker sessions (multi-cycle resumability, Part 11). */
   private readonly sessions = new Map<string, WorkerSession>();
-  /** Monotonic id counters (proposals and blockers number independently). */
+  /** Monotonic id counters (proposals, blockers, objections, decisions number independently). */
   private proposalSeq = 0;
   private blockerSeq = 0;
+  private objectionSeq = 0;
   private decisionSeq = 0;
   /** Objections already classified by the debate (once per task). */
   private readonly debatedObjections = new Set<string>();
@@ -292,10 +293,12 @@ export class Orchestrator {
     const prior = this.deps.events.readAll();
     for (const ev of prior) {
       if (ev.kind !== "objection") continue;
+      const id = String(ev.data["id"] ?? "");
       const statement = String(ev.data["statement"] ?? "");
-      if (!statement || this.debatedObjections.has(statement)) continue;
-      this.debatedObjections.add(statement);
-      const debate = this.debateObjection(statement, correction);
+      const dedupeKey = id || statement;
+      if (!statement || this.debatedObjections.has(dedupeKey)) continue;
+      this.debatedObjections.add(dedupeKey);
+      const debate = this.debateObjection(statement, correction, id || undefined);
       this.deps.events.append("task_updated", { notice: debate.guidance.slice(0, 400) });
     }
     const waiting = [...this.sessions.entries()].filter(([, s]) => s.waitingFor);
@@ -317,16 +320,22 @@ export class Orchestrator {
 
   /**
    * Objection debate (Part 93): classify a worker objection against the
-   * latest user instruction/correction. Returns the debate verdict and, when
-   * the objection survives, appends guidance the Manager must follow.
+   * latest user instruction/correction. The verdict is recorded as a
+   * first-class `objection_debated` event; a needs_decision verdict BLOCKS
+   * completion (via the gate) until a decision resolves the objection.
    */
-  debateObjection(objection: string, latestUserText: string): { verdict: "upheld" | "dismissed" | "needs_decision"; guidance: string } {
+  debateObjection(objection: string, latestUserText: string, objectionId?: string): { verdict: "upheld" | "dismissed" | "needs_decision"; guidance: string } {
     const debate = evaluateObjection(objection, latestUserText);
-    const prefix = `OBJECTION DEBATE (${debate.verdict}): ${debate.rationale}`;
+    this.deps.events.append("objection_debated", {
+      id: objectionId,
+      statement: objection.slice(0, 240),
+      debate: { verdict: debate.verdict, rationale: debate.rationale },
+    });
+    const prefix = `OBJECTION DEBATE (${debate.verdict})${objectionId ? ` ${objectionId}` : ""}: ${debate.rationale}`;
     if (debate.verdict === "needs_decision") {
       return {
         verdict: debate.verdict,
-        guidance: `${prefix}. You must either record a decision via the decision tool explaining why it is safe to proceed, or surface the objection to the user. Do not silently proceed.`,
+        guidance: `${prefix}. Record a decision via the decision tool that references this objection${objectionId ? ` (e.g. "resolves ${objectionId}: <why it is safe to proceed>")` : ""}, or surface it to the user. Open objections awaiting a decision keep the gate at BLOCKED.`,
       };
     }
     if (debate.verdict === "upheld") {
@@ -345,14 +354,35 @@ export class Orchestrator {
     this.deps.events.append("decision", { id, statement: statement.slice(0, 400), reason: reason?.slice(0, 400) });
     const text = statement.toLowerCase();
     const events = this.deps.events.readAll();
-    const blockerIds = new Set(events.filter((e) => e.kind === "blocker").map((e) => String(e.data["id"] ?? "")));
-    const resolvedIds = new Set(events.filter((e) => e.kind === "blocker_resolved").map((e) => String(e.data["id"] ?? "")));
     let resolved = 0;
+
+    // Blockers: resolve open ones whose id the decision names ('b-1' must not
+    // match 'b-10' — word-boundary match).
+    const blockerIds = new Set(events.filter((e) => e.kind === "blocker").map((e) => String(e.data["id"] ?? "")));
+    const resolvedBlockers = new Set(events.filter((e) => e.kind === "blocker_resolved").map((e) => String(e.data["id"] ?? "")));
     for (const blockerId of blockerIds) {
-      if (!blockerId || resolvedIds.has(blockerId)) continue;
-      // Word-boundary match so 'b-1' does not accidentally resolve 'b-10'.
+      if (!blockerId || resolvedBlockers.has(blockerId)) continue;
       if (!new RegExp(`\\b${blockerId}\\b`).test(text)) continue;
       this.deps.events.append("blocker_resolved", { id: blockerId, by: id });
+      resolved += 1;
+    }
+
+    // Objections: same id convention ('resolves obj-2'), plus statement-level
+    // resolution for objections that carry a decision's substance even without
+    // naming the id (legacy no-id objections). Resolving an objection is what
+    // un-BLOCKS the gate after a needs_decision debate.
+    const openObjections = events.filter((e) => e.kind === "objection");
+    const resolvedObjections = new Set(events.filter((e) => e.kind === "objection_resolved").map((e) => String(e.data["id"] ?? "")));
+    for (const ev of openObjections) {
+      const objId = String(ev.data["id"] ?? "");
+      if (objId && resolvedObjections.has(objId)) continue;
+      if (objId) {
+        if (!new RegExp(`\\b${objId}\\b`).test(text)) continue;
+      } else {
+        const objStatement = String(ev.data["statement"] ?? "").toLowerCase();
+        if (!objStatement || !text.includes(objStatement)) continue;
+      }
+      this.deps.events.append("objection_resolved", { id: objId, statement: String(ev.data["statement"] ?? "").slice(0, 240), by: id });
       resolved += 1;
     }
     return resolved;
@@ -501,8 +531,9 @@ export class Orchestrator {
       });
     }
     for (const o of report.objections.slice(0, 3)) {
+      const id = `obj-${++this.objectionSeq}`;
       const statement = o.statement.slice(0, 240);
-      this.deps.events.append("objection", { raised_by: `${role}:${workerId}`, statement });
+      this.deps.events.append("objection", { id, raised_by: `${role}:${workerId}`, statement });
       this.deps.learner?.store.add({
         type: "objection",
         key: statement.slice(0, 100),

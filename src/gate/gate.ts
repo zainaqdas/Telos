@@ -104,11 +104,19 @@ export class CompletionGate {
       return { skill: s.name, requirements: own.length, pending };
     });
 
+    // Collaboration state (Part 93): blockers stay visible until a recorded
+    // decision clears them, and objections whose debate verdict is
+    // needs_decision block until a decision resolves them — the Manager
+    // cannot complete a task past an unresolved disagreement.
+    const openBlockers = state.blockers.filter((b) => b.status === "open");
+    const undecidedObjections = state.objections.filter((o) => !o.resolved && o.debate?.verdict === "needs_decision");
+
     let verdict: GateVerdict;
-    if (blocked.length > 0) verdict = "BLOCKED";
+    if (blocked.length > 0 || openBlockers.length > 0 || undecidedObjections.length > 0) verdict = "BLOCKED";
     else if (unsatisfied.length > 0 || invalidated.length > 0 || unverifiedWrites || changeRequestedButNotMade) verdict = "INCOMPLETE";
     else verdict = "COMPLETE";
 
+    const clip = (s: string): string => (s.length > 80 ? `${s.slice(0, 80)}…` : s);
     const parts: string[] = [];
     if (satisfied.length) parts.push(`satisfied: ${satisfied.join(", ")}`);
     if (unsatisfied.length) parts.push(`unsatisfied: ${unsatisfied.join(", ")}`);
@@ -116,6 +124,8 @@ export class CompletionGate {
     if (invalidated.length) parts.push(`invalidated: ${invalidated.join(", ")}`);
     if (unverifiedWrites) parts.push("workspace was modified but nothing was run to verify it");
     if (changeRequestedButNotMade) parts.push("instruction requested changes but no workspace change or verification occurred");
+    for (const b of openBlockers) parts.push(`open blocker ${b.id}: ${clip(b.reason)} — resolve via the decision tool`);
+    for (const o of undecidedObjections) parts.push(`objection ${o.id || "(legacy)"} awaits a decision: ${clip(o.statement)}`);
     for (const s of skillAudit) {
       if (s.pending.length) parts.push(`skill ${s.skill} pending: ${s.pending.join(", ")}`);
     }

@@ -409,7 +409,7 @@ async function handleSlashCommand(
       }
       for (const [id, p] of proposals) out(`PROPOSAL ${id} [${p.status}] (${p.raisedBy}): ${p.statement}`);
       for (const b of blockers) out(`BLOCKER ${b.id}: ${b.reason}`);
-      for (const o of objections) out(`OBJECTION (${o.raisedBy}): ${o.statement}`);
+      for (const o of objections) out(`OBJECTION ${o.id || "(legacy)"}${o.debate ? ` [debate: ${o.debate.verdict}]` : ""} (${o.raisedBy}): ${o.statement}`);
       return;
     }
     case "cancel":

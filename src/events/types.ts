@@ -15,6 +15,8 @@ export type EventKind =
   | "proposal_invalidated"
   | "blocker_resolved"
   | "objection"
+  | "objection_debated"
+  | "objection_resolved"
   | "decision"
   | "delegation"
   | "worker_started"
@@ -104,7 +106,7 @@ export interface TeamState {
   instructions: Array<{ text: string; t: number; isCorrection: boolean }>;
   requirements: Map<string, RequirementRecord>;
   decisions: Array<{ id: string; statement: string; reason?: string; status: "active" | "superseded"; t: number }>;
-  objections: Array<{ id: string; statement: string; raisedBy: string; t: number; resolved: boolean }>;
+  objections: Array<{ id: string; statement: string; raisedBy: string; t: number; resolved: boolean; debate?: { verdict: "upheld" | "dismissed" | "needs_decision"; rationale: string } }>;
   blockers: Array<{ id: string; reason: string; status: "open" | "resolved"; t: number }>;
   findings: Array<{ text: string; source: string; t: number }>;
   /** Worker proposals (Part 91): first-class, status tracks correction invalidation. */

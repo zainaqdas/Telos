@@ -156,8 +156,34 @@ function apply(state: TeamState, ev: AgentEvent): void {
       });
       break;
     case "objection":
-      state.objections.push({ id: str(d["id"]), statement: str(d["statement"]), raisedBy: str(d["raised_by"]), t: ev.t, resolved: false });
+      state.objections.push({
+        id: str(d["id"]),
+        statement: str(d["statement"]),
+        raisedBy: str(d["raised_by"]),
+        t: ev.t,
+        resolved: false,
+        debate: isDebate(d["debate"])
+          ? (d["debate"] as { verdict: "upheld" | "dismissed" | "needs_decision"; rationale: string })
+          : undefined,
+      });
       break;
+    case "objection_debated": {
+      // Modern events carry the objection id; legacy objections (pre-Phase-7
+      // logs) are matched by statement and only gain a debate once.
+      const id = str(d["id"]);
+      const o = id
+        ? state.objections.find((ob) => ob.id === id)
+        : state.objections.find((ob) => !ob.id && ob.statement === str(d["statement"]) && !ob.debate);
+      if (o && isDebate(d["debate"])) {
+        o.debate = d["debate"] as { verdict: "upheld" | "dismissed" | "needs_decision"; rationale: string };
+      }
+      break;
+    }
+    case "objection_resolved": {
+      const o = state.objections.find((ob) => ob.id === str(d["id"]));
+      if (o) o.resolved = true;
+      break;
+    }
     case "blocker":
       state.blockers.push({ id: str(d["id"]), reason: str(d["reason"]), status: "open", t: ev.t });
       break;
@@ -235,4 +261,15 @@ function bool(v: unknown, fallback: boolean): boolean {
 }
 function obj(v: unknown): Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+function isDebate(v: unknown): boolean {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    !Array.isArray(v) &&
+    typeof (v as Record<string, unknown>)["verdict"] === "string" &&
+    ["upheld", "dismissed", "needs_decision"].includes(String((v as Record<string, unknown>)["verdict"])) &&
+    typeof (v as Record<string, unknown>)["rationale"] === "string"
+  );
 }
