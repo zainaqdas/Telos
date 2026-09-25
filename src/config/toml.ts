@@ -4,13 +4,13 @@
  * Deliberately small — full TOML is out of scope for v1; malformed input throws.
  */
 
-export type TomlValue = string | number | boolean | TomlValue[];
+export type TomlValue = string | number | boolean | TomlValue[] | TomlTable;
 export interface TomlTable {
   [key: string]: TomlValue | TomlTable;
-}
-
-const SECTION_RE = /^\s*\[\s*([A-Za-z0-9_.-]+)\s*\]\s*$/;
-const KV_RE = /^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$/;
+}const SECTION_RE = /^\s*\[\s*([A-Za-z0-9_.-]+)\s*\]\s*$/;
+const ARRAY_SECTION_RE = /^\s*\[\[\s*([A-Za-z0-9_.-]+)\s*\]\]\s*$/;
+const KV_RE =
+  /^\s*([A-Za-z0-9_-]+)\s*=\s*(.+?)\s*$/;
 
 export function parseToml(text: string): TomlTable {
   const root: TomlTable = {};
@@ -20,6 +20,48 @@ export function parseToml(text: string): TomlTable {
     const lineNo = i + 1;
     const line = raw.replace(/(^|\s)#.*$/, "").trim(); // strip comments
     if (!line) continue;
+
+    const arraySection = ARRAY_SECTION_RE.exec(line);
+    if (arraySection) {
+      // [[path]] — append a fresh table to the array at `path`. Intermediate
+      // segments resolve to the most recent table when they are arrays, so
+      // [[skill.checklist]] attaches to the last [[skill]] entry.
+      const parts = arraySection[1]!.split(".");
+      let cursor: TomlTable = current;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const key = parts[i]!;
+        const next = cursor[key];
+        if (next === undefined) {
+          const fresh: TomlTable = {};
+          cursor[key] = fresh;
+          cursor = fresh;
+        } else if (Array.isArray(next)) {
+          const last = next[next.length - 1];
+          if (typeof last !== "object" || last === null || Array.isArray(last)) {
+            throw new Error(`config line ${lineNo}: [[${arraySection[1]}]] conflicts with earlier value`);
+          }
+          cursor = last as TomlTable;
+        } else if (typeof next === "object") {
+          cursor = next as TomlTable;
+        } else {
+          throw new Error(`config line ${lineNo}: [[${arraySection[1]}]] conflicts with earlier value`);
+        }
+      }
+      const lastKey = parts[parts.length - 1]!;
+      const arr = cursor[lastKey];
+      if (arr === undefined) {
+        const fresh: TomlTable = {};
+        cursor[lastKey] = [fresh];
+        current = fresh;
+      } else if (Array.isArray(arr)) {
+        const fresh: TomlTable = {};
+        arr.push(fresh);
+        current = fresh;
+      } else {
+        throw new Error(`config line ${lineNo}: [[${arraySection[1]}]] conflicts with earlier value`);
+      }
+      continue;
+    }
 
     const section = SECTION_RE.exec(line);
     if (section) {

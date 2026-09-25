@@ -30,6 +30,7 @@ export type EventKind =
   | "requirement_added"
   | "requirement_satisfied"
   | "requirement_invalidated"
+  | "skill_activated"
   | "budget_exceeded"
   | "task_completed"
   | "task_cancelled";
@@ -56,6 +57,8 @@ export interface RequirementRecord {
   evidence: Evidence[];
   /** Guardrails the requirement belongs to (e.g. "security"), when applicable. */
   guardrail?: string;
+  /** Skill that registered this requirement, for the gate's skill audit. */
+  skill?: string;
 }
 
 export interface BudgetSnapshot {
@@ -98,6 +101,8 @@ export interface TeamState {
   objections: Array<{ id: string; statement: string; raisedBy: string; t: number; resolved: boolean }>;
   blockers: Array<{ id: string; reason: string; status: "open" | "resolved"; t: number }>;
   findings: Array<{ text: string; source: string; t: number }>;
+  /** Activated skills with their checklist requirement ids (Part 36). */
+  skills: Map<string, { name: string; source: string; status: "active"; requirementIds: string[]; activatedAt: number }>;
   workers: Map<string, { role: string; status: "running" | "completed" | "failed"; startedAt: number }>;
   budget: BudgetSnapshot;
   taskStatus: TaskStatus;

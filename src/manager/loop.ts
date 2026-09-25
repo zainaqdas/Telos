@@ -8,6 +8,7 @@ import type { EventLog } from "../events/log.ts";
 import { reduce } from "../events/state.ts";
 import type { CompletionGate, GateReport } from "../gate/gate.ts";
 import type { SynergonConfig } from "../config/schema.ts";
+import type { SkillRouter } from "../skills/router.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
 
 /**
@@ -27,6 +28,7 @@ export interface ManagerDeps {
   ctx: ToolExecContext;
   gate: CompletionGate;
   guard?: RepetitionGuard;
+  skillRouter?: SkillRouter;
   repoProfile?: string;
 }
 
@@ -80,6 +82,21 @@ export class ManagerLoop {
   async run(instruction: string, opts: RunOptions = {}): Promise<RunResult> {
     const isCorrection = opts.isCorrection === true;
     this.busy = true;
+
+    // Deterministic skill routing (Part 34): runtime activates skills, the
+    // model is informed but cannot skip or invent them.
+    if (this.deps.skillRouter) {
+      try {
+        for (const match of await this.deps.skillRouter.route(instruction)) {
+          this.deps.skillRouter.activate(match);
+          this.pushSystemNotice(
+            `Skill activated: ${match.skill.name} (${match.reasons.join(", ")}). Checklist requirements are now tracked by the runtime: ${match.skill.checklist.map((c) => c.requirementId).join(", ")}. Constraints will be enforced automatically.`,
+          );
+        }
+      } catch {
+        /* routing must never break the run */
+      }
+    }
     this.deps.events.append(isCorrection ? "user_correction" : "user_instruction", { text: instruction });
     const prefix = isCorrection ? "CORRECTION — highest priority, supersedes earlier instructions where they conflict: " : "";
     this.messages.push({ role: "user", parts: [{ type: "text", text: `${prefix}${instruction}` }] });
@@ -188,6 +205,10 @@ export class ManagerLoop {
       };
     }
 
+    // ── Skill constraints (Part 38): enforced by the runtime, before the tool runs.
+    const constraintBlock = await this.checkSkillConstraints(call.name);
+    if (constraintBlock) return { output: constraintBlock };
+
     this.deps.budget.record("tool_call");
     this.deps.events.append("tool_started", { name: call.name, args_summary: summarizeArgs(args) });
 
@@ -201,6 +222,10 @@ export class ManagerLoop {
     if (result.ok) {
       this.deps.events.append("tool_completed", { name: call.name, bytes: result.output.length });
       this.guard.record(key, fingerprint, true);
+      // A workspace edit is runtime evidence that a "fix" checklist step happened.
+      if (call.name === "edit_file" || call.name === "write_file") {
+        this.satisfySkillRequirements("-fix", result.output.slice(0, 120), "tool:" + call.name);
+      }
     } else {
       const exitCode = result.meta?.["exitCode"];
       const category =
@@ -213,29 +238,37 @@ export class ManagerLoop {
       this.deps.events.append("lesson_candidate", { category, tool: call.name, observation: result.output.slice(0, 300) });
     }
 
-    this.recordVerification(call.name, result.ok, result.output);
+    this.recordVerification(call.name, result.ok, result.output, String(args["command"] ?? ""));
     return { output: truncateForTranscript(result.output) };
   }
 
   /** Record test/build/lint shell results as verification events (gate inputs).
    *  The runtime — not the model — derives requirements from these results:
    *  a passing suite creates+satisfies "tests-pass"; a failing one invalidates it. */
-  private recordVerification(toolName: string, ok: boolean, output: string): void {
+  private recordVerification(toolName: string, ok: boolean, output: string, command = ""): void {
     if (toolName !== "run_shell") return;
-    const head = output.slice(0, 4000).toLowerCase();
-    const isTest = /\b(test|vitest|jest|node --test|mocha|pytest|cargo test)\b/.test(head) || head.includes("# pass");
+    // Classification considers the command itself plus its output: a direct
+    // `node --test` run may not echo the word "test" in its results.
+    const head = `${command}\n${output}`.slice(0, 4000).toLowerCase();
+    const isTest = /\b(tests?|vitest|jest|node --test|mocha|pytest|cargo test)\b/.test(head) || head.includes("# pass");
     const isBuild = /\b(build|tsc|compile)\b/.test(head);
     const isLint = /\b(lint|eslint|biome)\b/.test(head);
     const observation = output.slice(0, 200);
     if (isTest) {
       this.ensureRequirement("tests-pass", "Project tests pass", ok);
       this.deps.events.append("test_result", { ok, observation });
+      // Skill semantics (deterministic): a failing suite is evidence of
+      // reproduction; a passing suite verifies the fix.
+      if (ok) this.satisfySkillRequirements("-verify", observation, "tool:run_shell");
+      else this.satisfySkillRequirements("-reproduce", observation, "tool:run_shell");
     } else if (isBuild) {
       this.ensureRequirement("build-pass", "Project build succeeds", ok);
       this.deps.events.append("verification_result", { kind: "build", ok, observation });
+      if (ok) this.satisfySkillRequirements("-verify", observation, "tool:run_shell");
     } else if (isLint) {
       this.ensureRequirement("lint-pass", "Lint passes", ok);
       this.deps.events.append("verification_result", { kind: "lint", ok, observation });
+      if (ok) this.satisfySkillRequirements("-verify", observation, "tool:run_shell");
     }
   }
 
@@ -248,8 +281,58 @@ export class ManagerLoop {
     else this.deps.events.append("requirement_invalidated", { id, reason: "verification command failed" });
   }
 
+  /**
+   * Satisfy pending skill-owned requirements whose id carries the given
+   * suffix (skill checklist convention: *-reproduce, *-fix, *-verify).
+   * Evidence always comes from an executed tool, never from model prose.
+   */
+  private satisfySkillRequirements(suffix: string, observation: string, source: string): void {
+    const state = reduce(this.deps.events.readAll());
+    for (const [id, req] of state.requirements) {
+      if (req.skill && req.status === "pending" && id.endsWith(suffix)) {
+        this.deps.events.append("requirement_satisfied", { id, source, producer: "runtime", observation });
+      }
+    }
+  }
+
   private pushToolResult(id: string, name: string, output: string): void {
     this.messages.push({ role: "tool", parts: [{ type: "text", text: output }], toolCallId: id, toolName: name });
+  }
+
+  /** Inject a runtime notice into the transcript (not attributed to the user). */
+  private pushSystemNotice(text: string): void {
+    this.messages.push({ role: "system", parts: [{ type: "text", text }] });
+  }
+
+  /**
+   * Enforce skill constraints (Part 38): a blocking constraint refuses the
+   * tool call until its guarding requirement is satisfied; required returns
+   * a warning; advisory is informational. Requirements can be discharged by
+   * any runtime-verified evidence (e.g. a failing test run for tffb-reproduce).
+   */
+  private async checkSkillConstraints(toolName: string): Promise<string | null> {
+    const router = this.deps.skillRouter;
+    if (!router) return null;
+    const state = reduce(this.deps.events.readAll());
+    const warnings: string[] = [];
+    for (const skill of state.skills.values()) {
+      const def = router.skills.find((s) => s.name === skill.name);
+      if (!def) continue;
+      for (const c of def.constraints) {
+        if (c.beforeTool !== toolName) continue;
+        const req = state.requirements.get(c.requiresRequirement);
+        const discharged = req?.status === "satisfied";
+        if (discharged) continue;
+        const msg = `SKILL CONSTRAINT (${def.name}/${c.id}, ${c.severity}): ${c.description}. Satisfy requirement "${c.requiresRequirement}" first (${req ? `currently ${req.status}` : "not yet registered"}).`;
+        if (c.severity === "blocking") {
+          this.deps.events.append("failure", { source: "skill_constraint", message: msg });
+          return `REFUSED BY SKILL CONSTRAINT — ${msg} This call was not executed.`;
+        }
+        warnings.push(msg);
+      }
+    }
+    if (warnings.length) return `SKILL WARNINGS — ${warnings.join(" | ")}`;
+    return null;
   }
 
   private finish(status: RunResult["status"], assistantText: string, gate: GateReport | null = null): RunResult {

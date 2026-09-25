@@ -62,11 +62,18 @@ export function registerShellTools(registry: ToolRegistry, deps: ShellDeps): voi
 
       return await new Promise<ToolResult>((resolve) => {
         // detached + group kill => grandchildren die too (mandatory, Part 47).
+        // Inherited test-runner markers (NODE_TEST_CONTEXT) change how an
+        // inner `node --test` behaves (it can exit 0 without running its
+        // assertions), so they are stripped from the child environment.
+        const env: Record<string, string | undefined> = { ...process.env, SYNERGON: "1" };
+        for (const k of Object.keys(env)) {
+          if (k === "NODE_TEST_CONTEXT" || k.startsWith("NODE_TEST_")) delete env[k];
+        }
         const child = spawn("/bin/sh", ["-c", command], {
           cwd,
           detached: platform() !== "win32",
           stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env, SYNERGON: "1" },
+          env,
         });
         deps.cancellation.track(child);
 

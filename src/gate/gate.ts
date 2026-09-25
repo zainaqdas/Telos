@@ -94,6 +94,16 @@ export class CompletionGate {
       /\bmake (a|an) (new|fix|change|file|component|feature)\b/i.test(lastInstruction);
     const changeRequestedButNotMade = requestedChanges && !wroteWorkspace && !ranVerification;
 
+    // Skill audit (Part 39): every activated skill's checklist must be
+    // satisfied before the gate can rule COMPLETE. Requirements registered
+    // by skills already appear in `required` above; this adds visibility and
+    // catches a skill whose checklist never got registered.
+    const skillAudit = [...state.skills.values()].map((s) => {
+      const own = [...state.requirements.values()].filter((r) => r.skill === s.name);
+      const pending = own.filter((r) => r.status !== "satisfied" && r.status !== "waived").map((r) => r.id);
+      return { skill: s.name, requirements: own.length, pending };
+    });
+
     let verdict: GateVerdict;
     if (blocked.length > 0) verdict = "BLOCKED";
     else if (unsatisfied.length > 0 || invalidated.length > 0 || unverifiedWrites || changeRequestedButNotMade) verdict = "INCOMPLETE";
@@ -106,6 +116,9 @@ export class CompletionGate {
     if (invalidated.length) parts.push(`invalidated: ${invalidated.join(", ")}`);
     if (unverifiedWrites) parts.push("workspace was modified but nothing was run to verify it");
     if (changeRequestedButNotMade) parts.push("instruction requested changes but no workspace change or verification occurred");
+    for (const s of skillAudit) {
+      if (s.pending.length) parts.push(`skill ${s.skill} pending: ${s.pending.join(", ")}`);
+    }
     const summary = verdict === "COMPLETE" ? `all ${satisfied.length} required conditions satisfied` : parts.join("; ") || "no requirements registered";
 
     return { verdict, satisfied, unsatisfied, blocked, invalidated, summary };

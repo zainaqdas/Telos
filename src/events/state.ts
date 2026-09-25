@@ -18,6 +18,7 @@ export function reduce(events: AgentEvent[]): TeamState {
     objections: [],
     blockers: [],
     findings: [],
+    skills: new Map(),
     workers: new Map(),
     budget: makeBudget({ tokensUsed: 0, toolCallsUsed: 0, modelCallsUsed: 0, workersSpawned: 0 }, taskStart),
     taskStatus: "active",
@@ -82,8 +83,26 @@ function apply(state: TeamState, ev: AgentEvent): void {
         status: "pending",
         evidence: [],
         guardrail: optStr(d["guardrail"]),
+        skill: optStr(d["skill"]),
       };
       state.requirements.set(rec.id, rec);
+      // Link skill-owned requirements back to their skill for the audit.
+      if (rec.skill) {
+        const s = state.skills.get(rec.skill);
+        if (s) s.requirementIds.push(rec.id);
+      }
+      break;
+    }
+    case "skill_activated": {
+      // Checklist requirement ids arrive in activation order; collect from
+      // subsequent requirement_added events via the skill field.
+      state.skills.set(str(d["skill"]), {
+        name: str(d["skill"]),
+        source: str(d["source"]),
+        status: "active",
+        requirementIds: [],
+        activatedAt: ev.t,
+      });
       break;
     }
     case "requirement_satisfied": {

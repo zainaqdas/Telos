@@ -1,5 +1,29 @@
 # Synergon — Phase Reports
 
+## Phase 3 — Skill Engine
+
+**Implemented**
+
+- Skill schema (validated, normalized): metadata, triggers, framework/file/command evidence, checklists, constraints with severity (`advisory | required | blocking`) — validation rejects constraints referencing unknown checklist items (Parts 34, 37–38)
+- Loader with precedence: builtin → global (`~/.synergon/skills/*.toml`) → project (`.project-agent/skills/*.toml`); malformed skills degrade to warnings, never block the session (Part 71)
+- Two built-in skills: `test-first-bugfix` (reproduce → fix → verify, with a blocking no-blind-edit constraint) and `db-migration-safety`
+- Deterministic-first routing: explicit name > trigger > file-pattern > framework > command evidence, threshold-gated, capped at 3 activations; ambiguity-classifier hook present and unused (Part 35)
+- Activation emits `skill_activated` + checklist `requirement_added` events — the Completion Gate enforces skill checklists exactly like user requirements; activation is idempotent per task (Part 37)
+- Constraint enforcement in the Manager loop, before tool execution: blocking constraints REFUSE the call until the guarding requirement is satisfied; the model receives the refusal and must change course (Part 38)
+- Deterministic requirement discharge: a red test run satisfies `*-reproduce`, a workspace edit satisfies `*-fix`, a green run satisfies `*-verify` — always from executed tool evidence, never model prose
+- Gate skill audit: pending skill requirements are listed in the report and prevent COMPLETE (Part 39)
+- `/skills` command; skill routing feeds the transcript via runtime notices
+
+**Tested** — schema validation (including constraint-without-checklist-item), three-tier precedence override, routing tiers (explicit/trigger+command hits, unrelated miss), activation idempotency, blocking constraint refusing a premature edit through the real Manager loop, constraint discharge by runtime evidence, gate audit blocking premature completion.
+
+**Verified** — full suite green (50 tests), strict typecheck clean.
+
+**Failed / learned** — the TOML subset lacked array-of-tables (`[[skill]]`) support, so every skill file silently failed to parse (caught by the precedence test); skill files now parse. Deeper find: spawned shells inherited `NODE_TEST_CONTEXT` when Synergon itself ran under `node --test`, making an inner `node --test` exit 0 without executing assertions — a false-green that would have broken verification everywhere. The shell tool now strips test-runner env markers from children. Also: verification classification now examines the command string itself (a bare `node --test` never prints the word "test").
+
+**Remaining** — ambiguity classifier activation (needs a real workload), skill-defined verification commands to replace shell heuristics, evaluation harness for skill recall/precision (Parts 72–74).
+
+**Architecture changes** — skill checklists are requirements; skill constraints are pre-tool runtime checks; both flow through existing event/gate machinery with no new authorities. `TomlValue` extended for array-of-tables.
+
 ## Phase 0 — Foundation + Runtime Safety
 
 **Implemented**

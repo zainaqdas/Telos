@@ -15,6 +15,8 @@ import { CompletionGate } from "../gate/gate.ts";
 import { ManagerLoop } from "../manager/loop.ts";
 import { profileRepository } from "../context/profile.ts";
 import { StreamPrinter, streamWidth } from "./stream-printer.ts";
+import { loadSkills } from "../skills/loader.ts";
+import { SkillRouter } from "../skills/router.ts";
 
 /**
  * Interactive session (Part 60/62): terminal-native, minimal, no web UI.
@@ -59,17 +61,23 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     max_wall_time_seconds: limits.maxWallTimeSeconds,
   } });
 
-  const gate = new CompletionGate(() => events.readAll());
-  const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds });
-
   // Context Engine (Phase 2): focused repo profile injected into the system prompt.
   let repoProfile: string | undefined;
+  let profile: import("../context/profile.ts").RepoProfile | undefined;
   try {
-    const profile = await profileRepository(opts.projectRoot);
+    profile = await profileRepository(opts.projectRoot);
     repoProfile = profile.profileText;
   } catch {
     repoProfile = undefined; // profiling must never block a session
   }
+
+  const gate = new CompletionGate(() => events.readAll());
+  const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds });
+
+  // Skill Engine (Phase 3): load + route deterministically; activation and
+  // constraints are runtime-enforced.
+  const skills = loadSkills(opts.projectRoot);
+  const skillRouter = new SkillRouter({ skills, events, profile });
 
   const manager = new ManagerLoop({
     provider,
@@ -81,6 +89,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     cancellation,
     ctx,
     gate,
+    skillRouter,
     repoProfile,
   });
 
@@ -225,11 +234,25 @@ async function handleSlashCommand(
       }
       return;
     }
+    case "skills": {
+      const loaded = loadSkills(deps.projectRoot);
+      if (!loaded.length) {
+        out("(no skills loaded)");
+        return;
+      }
+      for (const s of loaded) {
+        out(
+          `${s.name}  [${s.source}]  auto=${s.autoInvoke ? "on" : "off"}  priority=${s.priority}\n  ${s.description}\n  checklist: ${s.checklist.map((c) => c.requirementId).join(", ") || "(none)"}\n  constraints: ${s.constraints.map((c) => `${c.id}:${c.severity}`).join(", ") || "(none)"}`,
+        );
+      }
+      return;
+    }
     case "help":
       out([
         "/help            this text",
         "/status          budget usage, task state, model",
         "/profile         repository profile (languages, commands, instructions)",
+        "/skills          list loaded skills (source, checklist, constraints)",
         "/diff            git diff of the workspace",
         "/cancel          cancel the running task",
         "/model           show configured model (change via config/env)",
