@@ -222,19 +222,37 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     }
   };
 
-  const processLine = async (trimmed: string): Promise<void> => {
+  const processLine = async (trimmed: string, isCorrection = false): Promise<void> => {
     if (trimmed.startsWith("/")) {
+      if (trimmed === "/correct" || trimmed.startsWith("/correct ")) {
+        const text = trimmed.slice("/correct".length).trim();
+        if (!text) {
+          out("usage: /correct <correction text>");
+          prompt();
+          return;
+        }
+        if (manager.isBusy()) {
+          manager.requestCancel();
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        out("[correction received — invalidating conflicting work]");
+        await runInstruction(text, true);
+        return;
+      }
       const handled = await handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot, learnerStore: learner.store });
       prompt();
       if (handled === "exit") shutdown(0);
       return;
     }
+    await runInstruction(trimmed, isCorrection);
+  };
+
+  const runInstruction = async (text: string, isCorrection: boolean): Promise<void> => {
 
     rendering = true;
     const started = Date.now();
     try {
-      const result = await manager.run(trimmed, {
-        onText: (delta) => printer.push(delta),
+      const result = await manager.run(text, { isCorrection, onText: (delta) => printer.push(delta),
         onTool: (name, summary) => {
           printer.newline();
           out(`  ⚙ ${name}  ${summary}`);
@@ -320,6 +338,7 @@ async function handleSlashCommand(
         "/memory          show durable memory (rules, lessons, rejected approaches)",
         "/diff            git diff of the workspace",
         "/cancel          cancel the running task",
+        "/correct <text>  send a correction (highest priority, invalidates conflicting work)",
         "/model           show configured model (change via config/env)",
         "/exit            quit Synergon",
       ].join("\n"));

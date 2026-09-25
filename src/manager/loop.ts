@@ -66,6 +66,7 @@ export class ManagerLoop {
   private readonly deps: ManagerDeps;
   private usage: Usage = emptyUsage();
   private busy = false;
+  private readonly rejectionHits = new Set<string>();
 
   constructor(deps: ManagerDeps) {
     this.deps = deps;
@@ -94,11 +95,11 @@ export class ManagerLoop {
         const negation = instruction.match(/\b(?:don't|do not|never|stop|no)\s+(?:use|using|add|write|touch|run)\s+([a-z0-9@/._-]+)/i);
         const directive = instruction.match(/\b(?:use|always|prefer)\s+([a-z0-9@/._-]+(?:\s+[a-z0-9@/._-]+)?)/i);
         if (negation) {
-          const approach = negation[1]!;
+          const approach = negation[1]!.replace(/[.,!?;]+$/, "");
           this.deps.learner.recordRejection(approach, `User correction: ${instruction.slice(0, 160)}`);
           this.deps.learner.recordUserRule(`Do not use ${approach}.`);
         } else if (directive) {
-          this.deps.learner.recordUserRule(`Prefer ${directive[1]}.`);
+          this.deps.learner.recordUserRule(`Prefer ${directive[1]!.replace(/[.,!?;]+$/, "")}.`);
         }
       } catch {
         /* rule capture must never break the run */
@@ -274,6 +275,8 @@ export class ManagerLoop {
       // A workspace edit is runtime evidence that a "fix" checklist step happened.
       if (call.name === "edit_file" || call.name === "write_file") {
         this.satisfySkillRequirements("-fix", result.output.slice(0, 120), "tool:" + call.name);
+        const scanNote = await this.scanRejections(String(args["path"] ?? ""));
+        if (scanNote) result.output = `${result.output}\n${scanNote}`;
       }
     } else {
       const exitCode = result.meta?.["exitCode"];
@@ -315,12 +318,16 @@ export class ManagerLoop {
     const isBuild = /\b(build|tsc|compile)\b/.test(head);
     const isLint = /\b(lint|eslint|biome)\b/.test(head);
     const observation = output.slice(0, 200);
+    // False-green guard: an exit-0 test run that executed ZERO tests proves
+    // nothing (e.g. empty suite, wrong glob). Never treat it as verification.
+    const zeroTests = /(?:^|\n)\s*(?:ℹ )?tests? 0\b/i.test(output) || /no tests (?:found|ran)/i.test(output);
+    const effectiveOk = ok && !(isTest && zeroTests);
     if (isTest) {
-      this.ensureRequirement("tests-pass", "Project tests pass", ok);
-      this.deps.events.append("test_result", { ok, observation });
+      this.ensureRequirement("tests-pass", "Project tests pass", effectiveOk);
+      this.deps.events.append("test_result", { ok: effectiveOk, observation: zeroTests && ok ? "exit 0 but 0 tests executed — not counted as verification" : observation });
       // Skill semantics (deterministic): a failing suite is evidence of
       // reproduction; a passing suite verifies the fix.
-      if (ok) this.satisfySkillRequirements("-verify", observation, "tool:run_shell");
+      if (effectiveOk) this.satisfySkillRequirements("-verify", observation, "tool:run_shell");
       else this.satisfySkillRequirements("-reproduce", observation, "tool:run_shell");
     } else if (isBuild) {
       this.ensureRequirement("build-pass", "Project build succeeds", ok);
@@ -340,6 +347,58 @@ export class ManagerLoop {
     if (!existing) this.deps.events.append("requirement_added", { id, description, required: true });
     if (ok) this.deps.events.append("requirement_satisfied", { id, source: "tool:run_shell", producer: "runtime", observation: "verification command succeeded" });
     else this.deps.events.append("requirement_invalidated", { id, reason: "verification command failed" });
+  }
+
+  /**
+   * Deterministic stale-rejection scan (Part 75: no stale implementation may
+   * survive unnoticed). After each workspace mutation, the written file is
+   * scanned for rejected-approach keys from memory. A hit is recorded as a
+   * failed verification_result the gate enforces; a later clean scan of the
+   * same file+key resolves it.
+   */
+  private async scanRejections(path: string): Promise<string | null> {
+    const learner = this.deps.learner;
+    if (!learner || !path) return null;
+    const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9@/._-]/g, "").replace(/\.+$/, "");
+    let content: string;
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const { join } = await import("node:path");
+      content = (await readFile(join(this.deps.ctx.root, path), "utf8")).toLowerCase();
+    } catch {
+      return null;
+    }
+    const hits: string[] = [];
+    for (const rec of learner.store.all("rejected_approach")) {
+      const key = norm(rec.key);
+      if (key.length < 3) continue;
+      const present = content.includes(key);
+      if (present) {
+        hits.push(key);
+        if (!this.rejectionHits.has(`${path}:${key}`)) {
+          this.rejectionHits.add(`${path}:${key}`);
+          this.deps.events.append("verification_result", {
+            kind: "rejection_scan",
+            ok: false,
+            observation: `rejected approach '${key}' present in ${path}`,
+          });
+          // Gate enforcement flows through requirements (Part 21).
+          this.ensureRequirement("rejection-clean", "No user-rejected approaches present in edited files", false);
+        }
+      } else if (this.rejectionHits.has(`${path}:${key}`)) {
+        this.rejectionHits.delete(`${path}:${key}`);
+        this.deps.events.append("verification_result", {
+          kind: "rejection_scan",
+          ok: true,
+          observation: `rejected approach '${key}' removed from ${path}`,
+        });
+        this.ensureRequirement("rejection-clean", "No user-rejected approaches present in edited files", true);
+      }
+    }
+    if (hits.length) {
+      return `RUNTIME SCAN: rejected approach(s) ${hits.map((k) => `'${k}'`).join(", ")} detected in ${path} — the user rejected this approach. Remove it and follow the user rule instead.`;
+    }
+    return null;
   }
 
   /**

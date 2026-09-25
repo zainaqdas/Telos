@@ -122,6 +122,21 @@ test("gate reaches COMPLETE when a test run satisfies the runtime-derived requir
   }
 });
 
+test("zero-test exit-0 suites are not counted as verification (false-green guard)", async () => {
+  const h = harness([
+    [callChunk("c1", "run_shell", JSON.stringify({ command: "npm test" }))],
+    [{ type: "text_delta", text: "All green." }],
+  ]);
+  try {
+    writeFileSync(join(h.dir, "package.json"), JSON.stringify({ name: "empty", scripts: { test: "node -e 'console.log(\"ℹ tests 0\")'" } }), "utf8");
+    const result = await h.loop.run("run the tests");
+    assert.equal(result.status, "incomplete", "empty suite must not yield COMPLETE");
+    assert.ok(h.events.readAll().some((e) => e.kind === "test_result" && e.data["ok"] === false));
+  } finally {
+    cleanup(h);
+  }
+});
+
 test("gate stays INCOMPLETE when the test run fails", async () => {
   const h = harness([
     [callChunk("c1", "run_shell", JSON.stringify({ command: "node -e \"console.error('test run: 2 failed'); process.exit(1)\"" }))],
