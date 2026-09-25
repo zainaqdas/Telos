@@ -1,0 +1,7 @@
+# Never commit user state, logs, or secrets
+.project-agent/
+.env
+.env.*
+
+node_modules/
+*.log

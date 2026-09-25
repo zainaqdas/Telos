@@ -1,0 +1,17 @@
+{
+  "name": "synergon",
+  "version": "0.1.0",
+  "description": "Terminal-native agentic coding CLI: persistent manager, evidence-based completion gate, hard runtime budgets.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "synergon": "./src/index.ts" },
+  "scripts": {
+    "start": "node src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
