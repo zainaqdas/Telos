@@ -138,23 +138,21 @@ MIT
 
 ## Installation
 
-One line (installs into `~/.telos` and puts `telos` on your PATH):
+```bash
+npm install -g @zainaqdas/telos
+```
+
+Requires Node 22.18+ (24 LTS ideal — the source runs on Node's native type
+stripping, and the package ships compiled JavaScript for installs).
+
+Prefer running from source? The installer clones the checkout, builds it,
+and links the same command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/zainaqdas/Telos/main/install.sh | bash
 ```
 
-Requires Node 22.18+ (24 LTS ideal — Telos runs on Node's native type
-stripping, zero runtime dependencies). If the repo is private, add a
-token with repo read access:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/zainaqdas/Telos/main/install.sh | bash -s -- --token ghp_xxx
-```
-
-Prefer npm? Once published, `npm install -g telos` gives the same command —
-the npm name `telos` is reserved by this package. From a checkout,
-`npm link` works identically.
+Or with npx, no install at all: `npx @zainaqdas/telos` in any project.
 
 ## Quick start
 
@@ -166,5 +164,6 @@ telos                 # starts the session
 ```
 
 Useful commands: `telos --version`, `telos status`, `telos init`,
-`telos --help`. Update the install by re-running the curl line; remove
-it with `bash ~/.telos/install.sh --uninstall`.
+`telos --help`. Update the npm install with `npm update -g @zainaqdas/telos`;
+update the source install by re-running the curl line; remove it with
+`bash ~/.telos/install.sh --uninstall`.
