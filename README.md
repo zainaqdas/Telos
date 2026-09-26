@@ -135,3 +135,36 @@ Zero runtime dependencies; TypeScript runs natively via Node type-stripping.
 ## License
 
 MIT
+
+## Installation
+
+One line (installs into `~/.telos` and puts `telos` on your PATH):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zainaqdas/Telos/main/install.sh | bash
+```
+
+Requires Node 22.18+ (24 LTS ideal — Telos runs on Node's native type
+stripping, zero runtime dependencies). If the repo is private, add a
+token with repo read access:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/zainaqdas/Telos/main/install.sh | bash -s -- --token ghp_xxx
+```
+
+Prefer npm? Once published, `npm install -g telos` gives the same command —
+the npm name `telos` is reserved by this package. From a checkout,
+`npm link` works identically.
+
+## Quick start
+
+```bash
+cd your-project
+telos                 # first run scaffolds .project-agent/config.toml
+# → set [model] name (or TELOS_MODEL) and export the API key env var
+telos                 # starts the session
+```
+
+Useful commands: `telos --version`, `telos status`, `telos init`,
+`telos --help`. Update the install by re-running the curl line; remove
+it with `bash ~/.telos/install.sh --uninstall`.
