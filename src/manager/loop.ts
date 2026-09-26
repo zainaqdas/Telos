@@ -38,6 +38,8 @@ export interface ManagerDeps {
   skillRouter?: SkillRouter;
   learner?: FailureLearner;
   repoProfile?: string;
+  /** Compact directory tree for large repos (Scale Batch 1); separate budget. */
+  repoTree?: string;
   /** Worker-mode construction: replaces the system prompt, suppresses the
    *  user_instruction event and per-instruction routing/memory injection. */
   workerPromptOverride?: { text: string; isWorker: true };
@@ -95,7 +97,7 @@ export class ManagerLoop {
     this.guard = deps.guard ?? new RepetitionGuard(DEFAULT_GUARD_CONFIG);
     this.messages.push({
       role: "system",
-      parts: [{ type: "text", text: deps.workerPromptOverride ? deps.workerPromptOverride.text : buildSystemPrompt(deps.config, deps.repoProfile) }],
+      parts: [{ type: "text", text: deps.workerPromptOverride ? deps.workerPromptOverride.text : buildSystemPrompt(deps.config, deps.repoProfile, deps.repoTree) }],
     });
     this.isWorker = deps.workerPromptOverride?.isWorker === true;
   }
@@ -120,7 +122,7 @@ export class ManagerLoop {
     this.messages.length = 0;
     this.messages.push({
       role: "system",
-      parts: [{ type: "text", text: this.deps.workerPromptOverride ? this.deps.workerPromptOverride.text : buildSystemPrompt(this.deps.config, this.deps.repoProfile) }],
+      parts: [{ type: "text", text: this.deps.workerPromptOverride ? this.deps.workerPromptOverride.text : buildSystemPrompt(this.deps.config, this.deps.repoProfile, this.deps.repoTree) }],
     });
     this.guard = this.deps.guard ?? new RepetitionGuard(DEFAULT_GUARD_CONFIG);
     this.usage = emptyUsage();

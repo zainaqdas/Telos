@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative } from "node:path";
 import type { ToolDefinition, ToolRegistry, ToolResult } from "./registry.ts";
 import { lineDiff, safePath, truncateOutput } from "./util.ts";
+import { searchText as engineSearch, findFiles as engineFind } from "./search-engine.ts";
 
 /**
  * Filesystem tools (Part 44): read_file, write_file, edit_file,
@@ -22,7 +23,16 @@ async function readTextFile(ctx: Parameters<ToolDefinition["execute"]>[1], path:
   const start = Math.max(0, (offset ?? 1) - 1);
   const end = limit && limit > 0 ? Math.min(total, start + limit) : Math.min(total, start + 2000);
   const slice = lines.slice(start, end);
-  return { content: slice.map((l, i) => `${start + i + 1}\t${l}`).join("\n"), totalLines: total };
+  // Per-line cap (OpenCode parity): one minified 5MB line must not eat the
+  // whole output budget. A visible marker tells the model the line was cut.
+  const MAX_LINE = 2_000;
+  const content = slice
+    .map((l, i) => {
+      const line = l.length > MAX_LINE ? `${l.slice(0, MAX_LINE)}… [line truncated to ${MAX_LINE} chars]` : l;
+      return `${start + i + 1}\t${line}`;
+    })
+    .join("\n");
+  return { content, totalLines: total };
 }
 
 function ok(output: string, meta?: Record<string, unknown>): ToolResult {
@@ -35,7 +45,8 @@ function fail(output: string, errorCategory = "tool_error"): ToolResult {
 export function registerFilesystemTools(registry: ToolRegistry): void {
   registry.register({
     name: "read_file",
-    description: "Read a text file from the workspace. Returns numbered lines; large files are cut off after ~2000 lines unless offset/limit are given.",
+    description:
+      "Read a text file from the workspace. Returns numbered lines. Default window: 2000 lines from the start (or from offset). To continue a large file, call again with a larger offset. Lines longer than 2000 chars are truncated. Prefer search_text/find_files to locate targets instead of reading blindly.",
     permission: "read",
     mutative: false,
     risk: "low",
@@ -54,9 +65,15 @@ export function registerFilesystemTools(registry: ToolRegistry): void {
         const p = safePath(ctx, String(args["path"] ?? ""));
         const st = await stat(p);
         if (st.isDirectory()) return fail(`path is a directory: ${args["path"]}`);
+        // Binary guard: reading a binary as utf8 floods the output budget with
+        // replacement garbage. Detect the NUL byte early and say what to do.
+        if (await looksBinary(p)) {
+          return fail(`binary file (${st.size} bytes) — not shown as text. If you need its contents, use run_shell with an appropriate tool (strings, base64, xxd).`, "binary_file");
+        }
         const { content, totalLines } = await readTextFile(ctx, p, typeof args["offset"] === "number" ? args["offset"] : undefined, typeof args["limit"] === "number" ? args["limit"] : undefined);
         const t = truncateOutput(ctx.redact(content), ctx.maxOutputBytes);
-        return ok(t.text, { totalLines, truncated: t.truncated });
+        const continueHint = totalLines > 2000 && (typeof args["offset"] !== "number") ? `\n[${totalLines} lines total — call again with offset to continue]` : "";
+        return ok(t.text + continueHint, { totalLines, truncated: t.truncated });
       } catch (err) {
         return fail(`read_file failed: ${(err as Error).message}`, "io_error");
       }
@@ -192,7 +209,7 @@ export function registerFilesystemTools(registry: ToolRegistry): void {
 
   registry.register({
     name: "find_files",
-    description: "Find files by glob-style name pattern (e.g. *.test.ts, package.json). Matches name, not content.",
+    description: "Find files by glob-style name pattern (e.g. *.test.ts, package.json). Matches name, not content. Honors .gitignore and skips dependency/build dirs. Preferred over guessing paths in a large repo.",
     permission: "read",
     mutative: false,
     risk: "low",
@@ -208,46 +225,24 @@ export function registerFilesystemTools(registry: ToolRegistry): void {
     async execute(args, ctx) {
       const pattern = String(args["pattern"] ?? "");
       if (!pattern) return fail("find_files: pattern required", "bad_args");
-      let regex: RegExp;
-      try {
-        regex = globToRegExp(pattern);
-      } catch {
-        return fail(`find_files: bad pattern ${pattern}`, "bad_args");
-      }
-      let base: string;
-      try {
-        base = args["subdir"] ? safePath(ctx, String(args["subdir"])) : ctx.root;
-      } catch (err) {
-        return fail(`find_files: ${(err as Error).message}`, "io_error");
-      }
-      const results: string[] = [];
-      const IGNORE = new Set(["node_modules", ".git", ".project-agent", "dist", "build", "coverage", ".next", "__pycache__"]);
-      const walk = async (dir: string, depth: number): Promise<void> => {
-        if (results.length >= 200 || depth > 12) return;
-        let entries;
+      let base = ctx.root;
+      if (args["subdir"]) {
         try {
-          entries = await readdir(dir, { withFileTypes: true });
-        } catch {
-          return;
+          base = safePath(ctx, String(args["subdir"]));
+        } catch (err) {
+          return fail(`find_files: ${(err as Error).message}`, "io_error");
         }
-        for (const e of entries) {
-          const full = join(dir, e.name);
-          if (e.isDirectory()) {
-            if (!IGNORE.has(e.name)) await walk(full, depth + 1);
-          } else if (regex.test(e.name)) {
-            results.push(relative(ctx.root, full));
-            if (results.length >= 200) return;
-          }
-        }
-      };
-      await walk(base, 0);
-      return ok(results.length ? results.join("\n") : "(no matches)", { count: results.length });
+      }
+      const res = await engineFind(base, pattern, { maxResults: 200 });
+      const files = res.hits.map((h) => h.file);
+      const note = res.truncated ? `\n… [truncated at ${res.hits.length} results — narrow the pattern]` : "";
+      return ok(files.length ? files.join("\n") + note : "(no matches)", { count: files.length });
     },
   });
 
   registry.register({
     name: "search_text",
-    description: "Search file contents with a literal or regex pattern. Respects common ignore dirs. Prefer narrow patterns and subdirs.",
+    description: "Search file contents with a literal or regex pattern. Uses ripgrep when available (fast on huge repos, honors .gitignore); otherwise a built-in scanner. Up to 3 matches per file. Prefer narrow patterns and a subdir in very large repos.",
     permission: "read",
     mutative: false,
     risk: "low",
@@ -257,7 +252,7 @@ export function registerFilesystemTools(registry: ToolRegistry): void {
         pattern: { type: "string", description: "Literal text or regex" },
         subdir: { type: "string", description: "Restrict to a subdirectory" },
         is_regex: { type: "boolean", description: "Treat pattern as regex (default false)" },
-        max_results: { type: "integer", description: "Default 50" },
+        max_results: { type: "integer", description: "Default 200" },
       },
       required: ["pattern"],
       additionalProperties: false,
@@ -265,62 +260,22 @@ export function registerFilesystemTools(registry: ToolRegistry): void {
     async execute(args, ctx) {
       const pattern = String(args["pattern"] ?? "");
       if (!pattern) return fail("search_text: pattern required", "bad_args");
-      let regex: RegExp;
-      try {
-        regex = args["is_regex"] === true ? new RegExp(pattern, "i") : new RegExp(escapeRe(pattern), "i");
-      } catch (err) {
-        return fail(`search_text: invalid regex: ${(err as Error).message}`, "bad_args");
-      }
-      let base: string;
-      try {
-        base = args["subdir"] ? safePath(ctx, String(args["subdir"])) : ctx.root;
-      } catch (err) {
-        return fail(`search_text: ${(err as Error).message}`, "io_error");
-      }
-      const max = typeof args["max_results"] === "number" ? args["max_results"] : 50;
-      const out: string[] = [];
-      const IGNORE = new Set(["node_modules", ".git", ".project-agent", "dist", "build", "coverage", ".next", "__pycache__"]);
-      const MAX_BYTES = 400_000;
-      let filesScanned = 0;
-      const walk = async (dir: string, depth: number): Promise<void> => {
-        if (out.length >= max || depth > 14) return;
-        let entries;
+      const regexSource = args["is_regex"] === true ? pattern : escapeRe(pattern);
+      let base = ctx.root;
+      if (args["subdir"]) {
         try {
-          entries = await readdir(dir, { withFileTypes: true });
-        } catch {
-          return;
+          base = safePath(ctx, String(args["subdir"]));
+        } catch (err) {
+          return fail(`search_text: ${(err as Error).message}`, "io_error");
         }
-        for (const e of entries) {
-          const full = join(dir, e.name);
-          if (e.isDirectory()) {
-            if (!IGNORE.has(e.name)) await walk(full, depth + 1);
-          } else {
-            filesScanned++;
-            if (filesScanned > 3000) return;
-            let isText = TEXT_EXTENSIONS.has(extname(e.name).toLowerCase()) || e.name.startsWith(".") || !extname(e.name);
-            if (!isText) continue;
-            let content: string;
-            try {
-              const st = await stat(full);
-              if (st.size > MAX_BYTES) continue;
-              content = await readFile(full, "utf8");
-            } catch {
-              continue;
-            }
-            const lines = content.split("\n");
-            for (let i = 0; i < lines.length && out.length < max; i++) {
-              const line = lines[i];
-              if (line && regex.test(line)) {
-                out.push(`${relative(ctx.root, full)}:${i + 1}: ${line.trim().slice(0, 240)}`);
-              }
-            }
-            if (out.length >= max) return;
-          }
-        }
-      };
-      await walk(base, 0);
-      const t = truncateOutput(ctx.redact(out.join("\n")), ctx.maxOutputBytes);
-      return ok(t.text || "(no matches)", { count: out.length, filesScanned });
+      }
+      const max = typeof args["max_results"] === "number" ? args["max_results"] : 200;
+      const res = await engineSearch(base, regexSource, { maxResults: max });
+      if (res.regexError) return fail(`search_text: invalid regex: ${res.regexError}`, "bad_args");
+      const out = res.hits.map((h) => `${h.file}:${h.line}: ${h.text}`);
+      const note = res.truncated ? `\n… [truncated at ${res.hits.length} results — narrow the pattern or add a subdir]` : "";
+      const t = truncateOutput(ctx.redact(out.join("\n")) + note, ctx.maxOutputBytes);
+      return ok(t.text || "(no matches)", { count: res.hits.length, engine: res.engine, truncated: res.truncated });
     },
   });
 }
@@ -339,9 +294,17 @@ function replaceN(text: string, oldStr: string, newStr: string, n: number): stri
   return out + rest;
 }
 
-function globToRegExp(glob: string): RegExp {
-  const esc = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[^/]*").replace(/\?/g, ".");
-  return new RegExp(`^${esc}$`, "i");
+/** NUL-byte sniff on the first 8KB — cheap binary detection. */
+async function looksBinary(path: string): Promise<boolean> {
+  const { open } = await import("node:fs/promises");
+  const fh = await open(path, "r");
+  try {
+    const buf = Buffer.alloc(8192);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    return buf.subarray(0, bytesRead).includes(0);
+  } finally {
+    await fh.close();
+  }
 }
 
 function escapeRe(s: string): string {

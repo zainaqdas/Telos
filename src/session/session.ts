@@ -99,10 +99,12 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   // Context Engine (Phase 2): focused repo profile injected into the system prompt.
   let repoProfile: string | undefined;
+  let repoTree: string | undefined;
   let profile: import("../context/profile.ts").RepoProfile | undefined;
   try {
     profile = await profileRepository(opts.projectRoot);
     repoProfile = profile.profileText;
+    repoTree = profile.treeText ?? undefined;
   } catch {
     repoProfile = undefined; // profiling must never block a session
   }
@@ -186,6 +188,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     skillRouter,
     learner,
     repoProfile,
+    repoTree,
     /** Compaction (Part 68): reducer-informed, threshold-gated (0 disables). */
     compaction: { thresholdTokens: config.runtime.compactionThresholdTokens ?? 60_000, eventSource: () => events.readAll() },
     onNotice: (text) => {

@@ -6,7 +6,7 @@
 
 import type { TelosConfig } from "../config/schema.ts";
 
-export function buildSystemPrompt(config: TelosConfig, repoProfile?: string): string {
+export function buildSystemPrompt(config: TelosConfig, repoProfile?: string, repoTree?: string): string {
   const lines = [
     "You are the Manager inside Telos, a terminal-native coding agent.",
     "You are the primary builder: you plan, edit code, run commands, and verify your own work.",
@@ -40,6 +40,14 @@ export function buildSystemPrompt(config: TelosConfig, repoProfile?: string): st
   ];
   if (repoProfile) {
     lines.push("", "REPOSITORY CONTEXT", repoProfile);
+  }
+  if (repoTree) {
+    lines.push(
+      "",
+      "REPOSITORY MAP",
+      "File counts per directory. This is an orientation map, not an inventory — use search_text / find_files to locate code, and read_file with offset/limit for large files.",
+      repoTree,
+    );
   }
   return lines.join("\n");
 }
