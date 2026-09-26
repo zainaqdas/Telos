@@ -25,6 +25,7 @@ export type EventKind =
   | "tool_started"
   | "tool_completed"
   | "tool_failed"
+  | "tool_spilled"
   | "test_result"
   | "review_result"
   | "verification_result"

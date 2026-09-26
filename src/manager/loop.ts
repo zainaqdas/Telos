@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Provider, Message, Usage } from "../providers/types.ts";
 import { ProviderError, emptyUsage, addUsage } from "../providers/types.ts";
 import type { ToolRegistry, ToolExecContext } from "../tools/registry.ts";
@@ -50,6 +52,9 @@ export interface ManagerDeps {
    * The digest is built from the event log — the authoritative record.
    */
   compaction?: { thresholdTokens: number; eventSource: () => import("../events/types.ts").AgentEvent[] };
+  /** Observed output-cap learning (Scale Batch 2): called when a completion
+   *  returns truncated so the session can adjust compaction/budget math. */
+  onObservedOutputCap?: (outputTokens: number) => void;
 }
 
 export interface RunOptions {
@@ -294,6 +299,12 @@ export class ManagerLoop {
       }
       if (text) assistantText = text;
       this.lastStopReason = stopReason;
+      // Observed-cap learning (Scale Batch 2): a truncated turn means the
+      // gateway caps output below what we asked for. Feed the usage back so
+      // the session's compaction math reflects reality.
+      if (stopReason === "length" && turnUsage && turnUsage.outputTokens > 0) {
+        this.deps.onObservedOutputCap?.(turnUsage.outputTokens);
+      }
 
       if (toolCalls.length === 0) {
         // Model finished its turn with prose — the Gate decides what happens.
@@ -365,7 +376,6 @@ export class ManagerLoop {
     // ── Repetition Guard: classify BEFORE executing (Part 26) ──
     const key = guardKey(call.name, args);
     const fingerprint = await fingerprintCall(call.name, args, this.deps.ctx.root);
-
     const schemaCheck = validateToolArgs(args, tool.parameters);
     if (!schemaCheck.ok) {
       this.deps.events.append("tool_failed", { name: call.name, tool_call_id: call.id, category: "bad_args", message: schemaCheck.error });
@@ -437,6 +447,14 @@ export class ManagerLoop {
     }
 
     this.recordVerification(call.name, result.ok, result.output, String(args["command"] ?? ""));
+    // Tool-output spill (Scale Batch 2): oversized outputs are written to
+    // .project-agent/spill/ so nothing the model might need is ever lost —
+    // the transcript keeps a bounded head plus a read-back path.
+    const spilled = spillToolOutput(this.deps.ctx.root, call.name, result.output);
+    if (spilled) {
+      this.deps.events.append("tool_spilled", { name: call.name, tool_call_id: call.id, file: spilled.file, bytes: spilled.bytes });
+      return { output: `${truncateForTranscript(result.output)}\n… [full ${spilled.bytes}-byte output saved to ${spilled.file} — read it with read_file]` };
+    }
     return { output: truncateForTranscript(result.output) };
   }
 
@@ -665,4 +683,24 @@ function sleep(ms: number): Promise<void> {
 function truncPathHint(argsJson: string): string {
   const m = /"path"\s*:\s*"([^"\\]{0,120})/.exec(argsJson);
   return m?.[1] ?? "the target file";
+}
+
+/**
+ * Tool-output spill (Scale Batch 2): outputs larger than the transcript cap
+ * are written under .project-agent/spill/ with a short id; the transcript
+ * keeps the truncated head plus the file path. Best-effort: a spill failure
+ * degrades to plain truncation, never breaks the run.
+ */
+function spillToolOutput(root: string, toolName: string, output: string): { file: string; bytes: number } | null {
+  if (output.length <= MAX_TOOL_OUTPUT_IN_TRANSCRIPT) return null;
+  try {
+    const dir = join(root, ".project-agent", "spill");
+    mkdirSync(dir, { recursive: true });
+    const id = `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const file = join(".project-agent", "spill", `${id}-${toolName}.txt`);
+    writeFileSync(join(root, file), output, "utf8");
+    return { file, bytes: output.length };
+  } catch {
+    return null;
+  }
 }

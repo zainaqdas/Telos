@@ -473,17 +473,16 @@ export class Orchestrator {
     // stripped are re-deferred so nothing re-appears mid-window.
     const registry = this.deps.registry;
     const key = "__writeTools";
-    const entry = ((registry as unknown as Record<string, unknown>)[key] ?? { count: 0, tools: [] as ToolDefinition[] }) as { count: number; tools: ToolDefinition[] };
+    const entry = ((registry as unknown as Record<string, unknown>)[key] ?? { count: 0, tools: [] as string[] }) as { count: number; tools: string[] };
     if (entry.count === 0) {
       for (const name of WRITE_TOOLS) {
-        const tool = registry.get(name);
-        if (tool) {
-          entry.tools.push(tool);
-          registry.remove(name);
+        if (registry.get(name) && !registry.isDisabled(name)) {
+          registry.setDisabled(name, true);
+          entry.tools.push(name);
         }
       }
       if (entry.tools.length > 0) {
-        this.deps.events.append("task_updated", { notice: `parallel_write_discipline: write tools stripped while workers run (${entry.tools.map((t) => t.name).join(", ")})` });
+        this.deps.events.append("task_updated", { notice: `parallel_write_discipline: write tools stripped while workers run (${entry.tools.join(", ")})` });
       }
     }
     entry.count += 1;
@@ -494,11 +493,8 @@ export class Orchestrator {
       released = true;
       entry.count -= 1;
       if (entry.count === 0) {
-        // remove-then-register: a mid-window re-registration must not make
-        // the restore throw (duplicate tool) or shadow the original.
-        for (const tool of entry.tools) {
-          registry.remove(tool.name);
-          registry.register(tool);
+        for (const name of entry.tools) {
+          registry.setDisabled(name, false);
         }
         (registry as unknown as Record<string, unknown>)[key] = undefined;
       }

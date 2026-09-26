@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { loadConfig, STATE_DIRNAME } from "../config/loader.ts";
 import type { TelosConfig } from "../config/schema.ts";
 import { createProvider, resolveApiKey } from "../providers/index.ts";
+import { resolveModelLimits, compactionThreshold, noteObservedCap, effectiveMaxOutput } from "../providers/catalog.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { registerFilesystemTools } from "../tools/fs-tools.ts";
 import { registerShellTools } from "../tools/shell-tools.ts";
@@ -96,6 +97,12 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     max_parallel_workers: limits.maxParallelWorkers,
     max_wall_time_seconds: limits.maxWallTimeSeconds,
   } });
+
+  // Model catalog (Scale Batch 2): real limits drive the wire max_tokens, the
+  // compaction threshold, and the banner. The limits object is mutable — an
+  // observed output cap (gateway truncation) updates it for this session.
+  const modelLimits = resolveModelLimits(config.model.name);
+  effectiveMaxOutput(modelLimits); // sanity: never throws, warms shape
 
   // Context Engine (Phase 2): focused repo profile injected into the system prompt.
   let repoProfile: string | undefined;
@@ -190,7 +197,14 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     repoProfile,
     repoTree,
     /** Compaction (Part 68): reducer-informed, threshold-gated (0 disables). */
-    compaction: { thresholdTokens: config.runtime.compactionThresholdTokens ?? 60_000, eventSource: () => events.readAll() },
+    compaction: { thresholdTokens: compactionThreshold(modelLimits), eventSource: () => events.readAll() },
+    /** Observed-cap learning (Scale Batch 2): truncation updates session limits. */
+    onObservedOutputCap: (outputTokens: number) => {
+      const before = effectiveMaxOutput(modelLimits);
+      noteObservedCap(modelLimits, outputTokens);
+      const after = effectiveMaxOutput(modelLimits);
+      if (after < before) out(`  ℹ provider output cap observed: ~${after} tokens (completions truncated) — compaction adjusted`);
+    },
     onNotice: (text) => {
       if (text.startsWith("Runtime lesson")) out(`  ℹ ${text.slice(0, 140)}`);
       else if (text.startsWith("PROJECT MEMORY") && process.env["TELOS_DEBUG_MEMORY"] === "1") {
@@ -211,7 +225,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   const pendingLines: string[] = [];
   let processing = false;
 
-  printBanner(config, taskId);
+  printBanner(config, taskId, modelLimits);
   renderBudgetBar(budget);
 
   // Streamed model text goes through the printer: raw passthrough on a TTY
@@ -782,11 +796,14 @@ function out(text: string): void {
   process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
 }
 
-function printBanner(config: TelosConfig, taskId: string): void {
+function printBanner(config: TelosConfig, taskId: string, limits?: { contextWindow: number; maxOutput: number; observedOutputCap?: number; source: string }): void {
   const keyEnv = config.model.apiKeyEnv;
   const hasKey = Boolean(process.env[keyEnv]);
+  const limitsText = limits
+    ? ` · context ${Math.round(limits.contextWindow / 1000)}k · out ${limits.observedOutputCap ? `~${Math.round(limits.observedOutputCap / 1000)}k (capped)` : `${Math.round(limits.maxOutput / 1000)}k`}`
+    : "";
   out([
-    `Telos — ${config.model.provider}/${config.model.name || "(model unset)"}  [${keyEnv}: ${hasKey ? "present" : "MISSING"}]`,
+    `Telos — ${config.model.provider}/${config.model.name || "(model unset)"}  [${keyEnv}: ${hasKey ? "present" : "MISSING"}]${limitsText}`,
     `task ${taskId}`,
     `budgets: ${config.runtime.maxTotalTokens} tokens · ${config.runtime.maxToolCalls} tool calls · ${config.runtime.maxWallTimeSeconds}s wall`,
     `Ctrl+C cancels the running task · Ctrl+C again exits · /help for commands`,

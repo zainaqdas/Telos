@@ -49,31 +49,62 @@ export interface ToolDefinition {
 
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolDefinition>();
+  /** Disabled tools stay registered for shape stability (prompt cache) but
+   *  resolve as absent; their specs render as disabled placeholders. */
+  private readonly disabled = new Set<string>();
 
   register(tool: ToolDefinition): void {
     if (this.tools.has(tool.name)) throw new Error(`duplicate tool: ${tool.name}`);
     this.tools.set(tool.name, tool);
+    this.disabled.delete(tool.name);
   }
 
   get(name: string): ToolDefinition | undefined {
+    if (this.disabled.has(name)) return undefined;
     return this.tools.get(name);
   }
 
-  /** Remove a tool (parallel-write discipline: write tools are stripped from
-   *  the Manager's registry while workers run; restore re-registers them). */
+  /** Remove a tool entirely (used by tests and external-tool reloads). */
   remove(name: string): void {
     this.tools.delete(name);
+    this.disabled.delete(name);
+  }
+
+  /**
+   * Disable without removing (parallel-write discipline, Scale Batch 2):
+   * the tool resolves as absent for execution, but `specs()` keeps emitting
+   * its definition in the SAME position, marked disabled — so the serialized
+   * tool array is byte-stable across the strip/restore window and
+   * provider-side prompt caches on the tools prefix stay valid.
+   */
+  setDisabled(name: string, disabled: boolean): void {
+    if (!this.tools.has(name)) return;
+    if (disabled) this.disabled.add(name);
+    else this.disabled.delete(name);
+  }
+
+  isDisabled(name: string): boolean {
+    return this.disabled.has(name);
   }
 
   names(): string[] {
     return [...this.tools.keys()].sort();
   }
 
-  /** Provider-facing specs (OpenAI function-calling shape). */
+  /** Provider-facing specs (OpenAI function-calling shape). Order is canonical
+   *  (sorted) and stable across disable/enable so prompt caches hold. */
   specs(): Array<{ name: string; description: string; parameters: Record<string, unknown> }> {
     return [...this.tools.values()]
       .sort((a, b) => a.name.localeCompare(b.name))
-      .map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+      .map((t) =>
+        this.disabled.has(t.name)
+          ? {
+              name: t.name,
+              description: `[currently disabled — write tools are paused while workers run; it will return when the workspace is yours again]`,
+              parameters: t.parameters,
+            }
+          : { name: t.name, description: t.description, parameters: t.parameters },
+      );
   }
 }
 
