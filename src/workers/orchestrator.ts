@@ -462,7 +462,9 @@ export class Orchestrator {
     const roleSpec = ROLES[session.role];
     const loop = new ManagerLoop({
       provider: this.deps.provider,
-      model: this.deps.model,
+      // Worker model override (spec Phase 9): a cheaper declared model keeps
+      // elastic staffing affordable; investigation rarely needs the flagship.
+      model: this.deps.config.model.workerModel || this.deps.model,
       config: this.deps.config,
       registry: scoped,
       events: this.deps.events,

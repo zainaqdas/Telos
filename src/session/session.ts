@@ -80,6 +80,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     maxWallTimeSeconds: config.runtime.maxWallTimeSeconds,
   };
   const budget = new BudgetEnforcer(limits);
+  if (config.model.pricing) budget.setPricing(config.model.pricing);
   events.append("task_started", { title: "interactive session", limits: {
     max_total_tokens: limits.maxTotalTokens,
     max_tool_calls: limits.maxToolCalls,
@@ -328,6 +329,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         runInstruction,
         providerCapabilities: () => provider.capabilities(config.model.name),
         attachedImages,
+        fetchModels: () => fetchModelList(config.model, apiKey),
         compactNow: () => manager.compactNow(),
         resetTask: (newTaskId: string) => {
           // Fresh task identity: new EventLog + reset budget, gate and
@@ -410,6 +412,7 @@ async function handleSlashCommand(
     attachedImages: Array<{ mediaType: string; data: string; name: string }>;
     runInstruction: (text: string, isCorrection: boolean) => Promise<void>;
     providerCapabilities: () => import("../providers/types.ts").Capabilities;
+    fetchModels: () => Promise<string[]>;
     compactNow: () => { compacted: boolean; removed: number; savedTokens: number };
     resetTask: (taskId: string) => void;
   },
@@ -491,6 +494,7 @@ async function handleSlashCommand(
         `waiting    ${waiting.length ? waiting.join(", ") : "(none)"}`,
         `collab     proposals ${activeProposals} active / ${needsRework} needs-rework · blockers ${openBlockers} open · objections ${openObjections} unresolved`,
         `wall time  ${Math.round((Date.now() - u.startedAt) / 1000)}s / ${l.maxWallTimeSeconds}s`,
+        ...(deps.budget.costEstimateUsd !== null ? [`cost est.  $${deps.budget.costEstimateUsd.toFixed(4)}${deps.config.model.pricing ? " (from declared pricing)" : ""}`] : []),
       ].join("\n"));
       return;
     }
@@ -627,8 +631,15 @@ async function handleSlashCommand(
       const caps = deps.providerCapabilities();
       out(`active provider ${deps.config.model.provider} — capabilities of ${deps.config.model.name || "(unset)"}:`);
       out(`  tools=${caps.supportsTools ? "yes" : "no"}  vision=${caps.supportsVision ? "yes" : "no"}  streaming=${caps.supportsStreaming ? "yes" : "no"}  structured=${caps.supportsStructuredOutput ? "yes" : "no"}  context=${caps.contextLimit}`);
-      const models = providerCatalog().find((p) => p.id === deps.config.model.provider)?.models ?? [];
-      out(models.length ? `known models: ${models.join(", ")}` : "known models: (openai-compatible endpoint — set model.name manually)");
+      // Live discovery first (Part 52: capability discovery); curated list as
+      // honest fallback when the endpoint has no /models route.
+      const live = await deps.fetchModels();
+      if (live.length) {
+        out(`available models (live): ${live.slice(0, 12).join(", ")}${live.length > 12 ? ` … +${live.length - 12} more` : ""}`);
+      } else {
+        const models = providerCatalog().find((p) => p.id === deps.config.model.provider)?.models ?? [];
+        out(models.length ? `known models (curated): ${models.join(", ")}` : "known models: (openai-compatible endpoint — set model.name manually)");
+      }
       return;
     }
     case "compact": {
@@ -654,6 +665,32 @@ async function handleSlashCommand(
 
 // ─── Output helpers ───────────────────────────────────────────────────────────
 
+/**
+ * Live model discovery (Part 52). OpenAI-shaped endpoints expose GET /models;
+ * Anthropic exposes /v1/models. Returns [] on any failure — the caller falls
+ * back to the curated catalog. Never throws; discovery is best-effort.
+ */
+async function fetchModelList(model: { provider: string; baseUrl: string; apiKeyEnv: string }, apiKey: string): Promise<string[]> {
+  const base = model.provider === "anthropic" ? model.baseUrl || "https://api.anthropic.com/v1" : model.baseUrl;
+  if (!base) return [];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    if (typeof timer.unref === "function") timer.unref();
+    const headers: Record<string, string> = model.provider === "anthropic"
+      ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
+      : apiKey ? { authorization: `Bearer ${apiKey}` } : {};
+    const res = await fetch(`${base.replace(/\/$/, "")}/models`, { headers, signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return [];
+    const body = (await res.json()) as { data?: Array<{ id?: string }> } | Array<{ id?: string }>;
+    const list = Array.isArray(body) ? body : body.data ?? [];
+    return list.map((m) => String(m.id ?? "")).filter((id) => id.length > 0).sort();
+  } catch {
+    return [];
+  }
+}
+
 function out(text: string): void {
   process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
 }
@@ -675,5 +712,9 @@ function renderBudgetBar(budget: BudgetEnforcer, waitingWorkers = 0): void {
   const tokPct = Math.min(100, Math.round((u.tokens / Math.max(1, l.maxTotalTokens)) * 100));
   const toolPct = Math.min(100, Math.round((u.toolCalls / Math.max(1, l.maxToolCalls)) * 100));
   const waitInfo = waitingWorkers > 0 ? ` · waiting: ${waitingWorkers}` : "";
-  out(`budget: tokens ${u.tokens}/${l.maxTotalTokens} (${tokPct}%) · tools ${u.toolCalls}/${l.maxToolCalls} (${toolPct}%)${waitInfo}`);
+  // Cost appears only when the user declared pricing or the provider reports
+  // it — an estimate is never invented (Part 24).
+  const cost = budget.costEstimateUsd;
+  const costInfo = cost !== null ? ` · $${cost.toFixed(4)}` : "";
+  out(`budget: tokens ${u.tokens}/${l.maxTotalTokens} (${tokPct}%) · tools ${u.toolCalls}/${l.maxToolCalls} (${toolPct}%)${costInfo}${waitInfo}`);
 }

@@ -15,6 +15,10 @@ export interface BudgetLimits {
 
 export interface UsageState {
   tokens: number;
+  /** Input/output granularity for cost estimation (Part 24). */
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
   toolCalls: number;
   modelCalls: number;
   workersSpawned: number;
@@ -34,11 +38,13 @@ export class BudgetEnforcer {
   private state: UsageState;
   private readonly limits: BudgetLimits;
   private readonly nowFn: () => number;
+  /** Running cost estimate in USD; null until the user declares pricing (Part 24). */
+  private costAccumulated: number | null = null;
 
   constructor(limits: BudgetLimits, now: () => number = Date.now) {
     this.limits = limits;
     this.nowFn = now;
-    this.state = { tokens: 0, toolCalls: 0, modelCalls: 0, workersSpawned: 0, runningWorkers: 0, startedAt: now() };
+    this.state = { tokens: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, toolCalls: 0, modelCalls: 0, workersSpawned: 0, runningWorkers: 0, startedAt: now() };
   }
 
   get used(): UsageState {
@@ -91,7 +97,38 @@ export class BudgetEnforcer {
 
   recordUsage(usage: Usage): void {
     this.state.tokens += usage.totalTokens;
+    this.state.inputTokens += usage.inputTokens;
+    this.state.outputTokens += usage.outputTokens;
+    this.state.cachedTokens += usage.cachedTokens;
     this.state.modelCalls += usage.modelCalls;
+    if (usage.costUsd !== null) {
+      // Provider-reported cost is authoritative when it exists.
+      this.costAccumulated = (this.costAccumulated ?? 0) + usage.costUsd;
+    }
+  }
+
+  private pricing?: { inputPerMtok: number; outputPerMtok: number; cacheReadPerMtok?: number };
+
+  /** Declare per-model pricing (USD per million tokens); enables cost estimates. */
+  setPricing(pricing: { inputPerMtok: number; outputPerMtok: number; cacheReadPerMtok?: number }): void {
+    this.pricing = pricing;
+  }
+
+  /**
+   * Cost so far in USD. Provider-reported figures are authoritative; without
+   * them, the user-declared per-Mtok pricing yields an estimate from actual
+   * token counts. null means unknown — never a fabricated number (Part 24).
+   */
+  get costEstimateUsd(): number | null {
+    if (!this.pricing) return this.costAccumulated;
+    const { inputPerMtok, outputPerMtok, cacheReadPerMtok } = this.pricing;
+    // Cached tokens bill at the (cheaper) cache-read rate when declared.
+    const billedInput = this.state.inputTokens - this.state.cachedTokens;
+    const estimate =
+      (Math.max(0, billedInput) / 1_000_000) * inputPerMtok +
+      (this.state.outputTokens / 1_000_000) * outputPerMtok +
+      (cacheReadPerMtok !== undefined ? (this.state.cachedTokens / 1_000_000) * cacheReadPerMtok : 0);
+    return this.costAccumulated === null ? estimate : this.costAccumulated + estimate;
   }
 
   workerFinished(): void {
@@ -100,7 +137,8 @@ export class BudgetEnforcer {
 
   /** /new (Part 61): usage counters start over for the fresh task. */
   resetUsage(): void {
-    this.state = { tokens: 0, toolCalls: 0, modelCalls: 0, workersSpawned: 0, runningWorkers: 0, startedAt: this.nowFn() };
+    this.state = { tokens: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, toolCalls: 0, modelCalls: 0, workersSpawned: 0, runningWorkers: 0, startedAt: this.nowFn() };
+    this.costAccumulated = null;
   }
 
   /** First budget violation wins; used to emit budget_exceeded once. */

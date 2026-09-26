@@ -68,9 +68,15 @@ The Manager is the primary builder: it plans, edits, runs, and verifies. Workers
 
 ```toml
 [model]
-provider = "openai"            # openai | openai-compatible | openrouter | ollama
+provider = "openai"            # openai | anthropic | openai-compatible | openrouter | ollama
 name = ""                      # or SYNERGON_MODEL
 api_key_env = "OPENAI_API_KEY" # BYOK: env var holding your key
+worker_model = ""              # optional cheaper model for worker delegations
+
+[model.pricing]                # optional: USD per million tokens → enables cost estimates
+input_per_mtok = 3
+output_per_mtok = 15
+cache_read_per_mtok = 0.3
 
 [runtime]
 autonomy = "balanced"

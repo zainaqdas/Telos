@@ -1,5 +1,25 @@
 # Synergon — Phase Reports
 
+## Phase 11 (spec Phase 9) — BYOK + Additional Providers + Cost Accounting
+
+**Implemented**
+
+- **Native Anthropic provider** (Parts 52–53): the Messages API is genuinely not OpenAI-shaped, so it got its own implementation — system as a top-level parameter, tool results as `tool_result` blocks inside user turns, tool calls as `tool_use` content blocks assembled from `input_json_delta` streams, images as `source.base64` blocks, usage split across `message_start` (input/cache-read tokens) and `message_delta` (output tokens). Same `Provider` interface, same watchdog-abort/retryable-error discipline as the OpenAI path; adding it required zero Manager changes (Part 53 satisfied).
+- **Cost accounting** (Parts 22–24): `[model.pricing]` in config declares USD-per-Mtok prices (input/output, optional cache-read); the BudgetEnforcer computes cost from actual token granularity (`inputTokens`/`outputTokens`/`cachedTokens` now tracked). Provider-reported `costUsd` is authoritative when present; declared pricing yields the estimate otherwise; **both absent → null, never invented**. Displayed in the budget bar and `/status`. The schema stays ready for future provider-reported costs exactly as Part 23 asked in Phase 0.
+- **Live model discovery** (Part 52): `/models` queries the endpoint's `/models` route (OpenAI-shape and Anthropic-shape both supported) and falls back honestly to the curated catalog when the endpoint has none. Verified live: the vyceai endpoint returned its model list.
+- **Worker model override** (Part 7 affinity): `worker_model = "…"` in `[model]` routes worker delegations to a cheaper model — elastic staffing becomes economical; the Manager keeps the flagship.
+- Anthropic joined the provider catalog (`/provider` now shows it as available) and the BYOK default-key mapping (`ANTHROPIC_API_KEY`).
+
+**Tested** — 8 new tests: Messages-API request encoding (system hoisting, tool_result/tool_use blocks, image source blocks, input_schema tools), SSE text+usage assembly (input 120 / cached 50 / output 7 → correct combined usage), tool_use delta assembly (`{"path":"."}` reassembled from two deltas), factory returns the native path, cost estimate null-without-pricing → computed-with-pricing (cache-read rate honored) → provider-reported authoritative, `[model.pricing]` parsing + validation (`input_per_mtok: "free"` rejected), `resetUsage` clears accumulated cost. `npx tsc --noEmit` clean; **137/137** unit tests; scenarios 6/6.
+
+**Verified live** — real-provider smoke: `/models` returned the endpoint's live model list (7 models incl. `deepseek-v4.1`); a real turn with declared pricing (`$1/$4 per Mtok`) displayed `cost est. $0.0025 (from declared pricing)` after ~2.4k tokens. No Anthropic key in this environment, so the native path is mock-verified (SSE mock server) rather than live-verified — honest limitation.
+
+**Failed / learned** — the smoke config first used a TOML inline table (`pricing = { … }`), which our minimal parser rejects; the `[model.pricing]` section form is the documented shape (inline tables remain unsupported — consistent with the parser's scope). The capabilities stub initially matched only `claude-3`/`claude-4` strings, misclassifying `claude-sonnet-4-5`; capability checks for unknown models now default to capable rather than silently disabling features.
+
+**Remaining** — MCP (spec Phase 10) through the unified registry, optimization phase (Part 96: gate re-reduction caching, retrieval/prompt tuning), per-provider capability probing at session start, Anthropic live-key verification.
+
+**Architecture changes** — two genuinely different wire protocols behind one interface; cost became first-class budget state (tracked per granularity, displayed, never fabricated); model selection is now per-role (manager vs workers).
+
 ## Phase 10 (spec Phase 8) — Web + Browser + Vision
 
 **Implemented**

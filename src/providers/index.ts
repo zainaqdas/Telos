@@ -1,4 +1,5 @@
 import { OpenAICompatibleProvider } from "./openai-compatible.ts";
+import { AnthropicProvider } from "./anthropic.ts";
 import {
   type Capabilities,
   ProviderError,
@@ -26,8 +27,7 @@ export function createProvider(opts: { provider: string; apiKey?: string; baseUr
     case "openai-compatible":
       return new OpenAICompatibleProvider(apiKey, opts.baseUrl, t);
     case "anthropic":
-      // Anthropic's public API is not OpenAI-shaped; Phase 9 adds a native path.
-      throw new ProviderError("anthropic native provider lands in Phase 9; use an openai-compatible endpoint for now");
+      return new AnthropicProvider(apiKey, opts.baseUrl, t);
     default:
       throw new ProviderError(`unknown provider: ${opts.provider}`);
   }
@@ -55,12 +55,13 @@ export const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   { id: "openrouter", defaultKeyEnv: "OPENROUTER_API_KEY", defaultBaseUrl: "https://openrouter.ai/api/v1", status: "available", note: "OpenAI-compatible path; model string selects the upstream" },
   { id: "ollama", defaultKeyEnv: "OLLAMA_API_KEY", defaultBaseUrl: "http://localhost:11434/v1", status: "available", note: "local; many models ignore tools/vision — capabilities are reported per model" },
   { id: "openai-compatible", defaultKeyEnv: "OPENAI_API_KEY", defaultBaseUrl: "", status: "available", note: "any OpenAI-shaped endpoint (base_url required)" },
-  { id: "anthropic", defaultKeyEnv: "ANTHROPIC_API_KEY", defaultBaseUrl: "https://api.anthropic.com/v1", status: "planned", note: "native path lands in spec Phase 9; use an openai-compatible endpoint meanwhile" },
+  { id: "anthropic", defaultKeyEnv: "ANTHROPIC_API_KEY", defaultBaseUrl: "https://api.anthropic.com/v1", status: "available", note: "native Messages API path (tools, vision, streaming)" },
 ];
 
 /** Known models per provider for /models (curated, not exhaustive). */
 const MODEL_CATALOG: Record<string, string[]> = {
   openai: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "o4-mini"],
+  anthropic: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"],
   openrouter: ["anthropic/claude-sonnet-4", "openai/gpt-4.1", "google/gemini-2.5-pro", "meta-llama/llama-4-maverick"],
   ollama: ["llama3.2", "qwen3", "devstral"],
   "openai-compatible": [],
@@ -71,4 +72,5 @@ export function providerCatalog(): Array<ProviderCatalogEntry & { models: string
 }
 
 export { OpenAICompatibleProvider };
+export { AnthropicProvider };
 export type { Provider, Capabilities, GenerateRequest, StreamChunk } from "./types.ts";

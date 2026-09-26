@@ -64,6 +64,13 @@ export interface ModelConfig {
   apiKeyEnv: string;
   temperature: number;
   maxTokens: number;
+  /**
+   * User-declared pricing in USD per million tokens (Part 23): cost is
+   * COMPUTED, never invented — null until the user supplies prices.
+   */
+  pricing?: { inputPerMtok: number; outputPerMtok: number; cacheReadPerMtok?: number };
+  /** Optional cheaper model for worker delegations (Part 7: elastic staffing). */
+  workerModel?: string;
 }
 
 export interface RuntimeConfig {
@@ -96,6 +103,18 @@ export interface SynergonConfig {
 
 // ─── Normalization ────────────────────────────────────────────────────────────
 
+/** Optional [model.pricing] table: USD per million tokens, user-declared. */
+function parsePricing(model: Record<string, unknown>): { pricing?: { inputPerMtok: number; outputPerMtok: number; cacheReadPerMtok?: number } } {
+  const raw = model["pricing"];
+  if (raw === undefined) return {};
+  const p = expectObject(raw, "model.pricing");
+  const input = expectInt(p["input_per_mtok"], "model.pricing.input_per_mtok", { min: 0 });
+  const output = expectInt(p["output_per_mtok"], "model.pricing.output_per_mtok", { min: 0 });
+  if (p["cache_read_per_mtok"] === undefined) return { pricing: { inputPerMtok: input, outputPerMtok: output } };
+  const cache = expectInt(p["cache_read_per_mtok"], "model.pricing.cache_read_per_mtok", { min: 0 });
+  return { pricing: { inputPerMtok: input, outputPerMtok: output, cacheReadPerMtok: cache } };
+}
+
 export function parseConfig(root: Record<string, unknown>): SynergonConfig {
   const model = expectObject(root["model"], "[model]");
   const runtime = expectObject(root["runtime"], "[runtime]");
@@ -109,6 +128,8 @@ export function parseConfig(root: Record<string, unknown>): SynergonConfig {
       apiKeyEnv: expectString(model["api_key_env"], "model.api_key_env", { fallback: "OPENAI_API_KEY" }),
       temperature: expectInt(model["temperature"], "model.temperature", { min: 0, max: 2, fallback: 0 }),
       maxTokens: expectInt(model["max_tokens"], "model.max_tokens", { min: 256, fallback: 16384 }),
+      ...parsePricing(model),
+      workerModel: expectString(model["worker_model"], "model.worker_model", { optional: true }),
     },
     runtime: {
       autonomy: expectEnum(runtime["autonomy"], "runtime.autonomy", ["ask", "balanced", "autonomous"] as const, "balanced"),
