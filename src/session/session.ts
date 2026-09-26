@@ -59,7 +59,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   const stateDir = join(opts.projectRoot, STATE_DIRNAME);
   mkdirSync(join(stateDir, "events"), { recursive: true });
 
-  const apiKey = resolveApiKey(config.model.apiKeyEnv);
+  const apiKey = resolveApiKey(config.model.apiKeyEnv, config.model.provider);
   installSecret(apiKey);
   const provider = createProvider({
     provider: config.model.provider,

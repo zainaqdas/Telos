@@ -25,6 +25,24 @@ export function expectString(v: unknown, path: string, opts: { optional?: boolea
   return v;
 }
 
+/**
+ * api_key_env is the NAME of an environment variable, not the key itself.
+ * A common real-world mistake is pasting the raw key ("sk-...") into the
+ * config; that yields a 401 from the provider with no actionable hint.
+ * Reject it at load time with a clear message instead.
+ */
+export function expectEnvVarName(v: unknown, path: string, opts: { optional?: boolean; fallback?: string } = {}): string {
+  const name = expectString(v, path, opts);
+  if (name && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) === false) {
+    throw new ConfigError(
+      `${path}: "${name.slice(0, 8)}…" does not look like an environment variable name — it looks like the key itself. ` +
+      `Set api_key_env to the NAME of an env var (e.g. "TELOS_API_KEY"), and put the key value in that variable. ` +
+      `Or delete the [model] section and run telos again to configure interactively.`,
+    );
+  }
+  return name;
+}
+
 export function expectEnum<T extends string>(v: unknown, path: string, allowed: readonly T[], fallback: T): T {
   if (v === undefined) return fallback;
   if (typeof v !== "string" || !allowed.includes(v as T)) {
@@ -125,7 +143,7 @@ export function parseConfig(root: Record<string, unknown>): TelosConfig {
       provider: expectEnum(model["provider"], "model.provider", PROVIDERS, "openai"),
       name: expectString(model["name"], "model.name", { fallback: "" }),
       baseUrl: expectString(model["base_url"], "model.base_url", { fallback: "" }),
-      apiKeyEnv: expectString(model["api_key_env"], "model.api_key_env", { fallback: "OPENAI_API_KEY" }),
+      apiKeyEnv: expectEnvVarName(model["api_key_env"], "model.api_key_env", { fallback: "TELOS_API_KEY" }),
       temperature: expectInt(model["temperature"], "model.temperature", { min: 0, max: 2, fallback: 0 }),
       maxTokens: expectInt(model["max_tokens"], "model.max_tokens", { min: 256, fallback: 16384 }),
       ...parsePricing(model),

@@ -1,5 +1,6 @@
 import { OpenAICompatibleProvider } from "./openai-compatible.ts";
 import { AnthropicProvider } from "./anthropic.ts";
+import { resolveApiKeyWithStore } from "../config/credentials.ts";
 import {
   type Capabilities,
   ProviderError,
@@ -33,10 +34,12 @@ export function createProvider(opts: { provider: string; apiKey?: string; baseUr
   }
 }
 
-/** Resolve the BYOK key from the configured env var; never log or persist it. */
-export function resolveApiKey(apiKeyEnv: string): string {
-  const key = process.env[apiKeyEnv];
-  return typeof key === "string" ? key : "";
+/**
+ * Resolve the BYOK key: env var first, then the machine-scoped credential
+ * store written by the interactive setup wizard. Never log or persist it.
+ */
+export function resolveApiKey(apiKeyEnv: string, provider = ""): string {
+  return resolveApiKeyWithStore(apiKeyEnv, provider);
 }
 
 export interface ProviderCatalogEntry {

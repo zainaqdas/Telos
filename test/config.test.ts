@@ -31,7 +31,7 @@ test("config defaults apply and validation rejects bad enums", () => {
   const ok = parseConfig({});
   assert.equal(ok.runtime.maxTotalTokens, 80_000);
   assert.equal(ok.runtime.autonomy, "balanced");
-  assert.equal(ok.model.apiKeyEnv, "OPENAI_API_KEY");
+  assert.equal(ok.model.apiKeyEnv, "TELOS_API_KEY");
 
   assert.throws(() => parseConfig({ model: { provider: "warp-drive" } }), /expected one of/);
   assert.throws(() => parseConfig({ runtime: { max_total_tokens: 5 } }), /must be >=/);

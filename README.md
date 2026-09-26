@@ -31,20 +31,32 @@ cd your-project
 telos
 ```
 
-The first run scaffolds `.project-agent/config.toml` and tells you what to fill in:
-
-1. **Set a model** — either in `config.toml` under `[model] name`, or via the environment: `export TELOS_MODEL=gpt-5-mini`
-2. **Provide your API key** — Telos reads it from the environment variable named by `api_key_env` (default `OPENAI_API_KEY`). Keys are never written to prompts, logs, event history, or Git.
-3. **Run `telos` again** — the session starts:
+The first run runs a short interactive setup — four questions, no files to edit, nothing to export:
 
 ```
+Telos setup — three questions and you're running.
+
+Choose a provider:
+  1. OpenAI
+  2. Anthropic
+  3. OpenRouter
+  4. Ollama (local)
+  5. Custom OpenAI-compatible endpoint (custom endpoint)
+Provider [1]: 1
+Use OpenAI's default endpoint (https://api.openai.com/v1)? [Y/n]: Y
+API key (input hidden, stored at ~/.telos/credentials.json): ********
+Model name [gpt-5-mini]:
+
+Ready.
+  provider  openai → https://api.openai.com/v1
+  model     gpt-5-mini
+  key       stored under OPENAI_API_KEY in ~/.telos/credentials.json (mode 600)
+Starting your session…
+
 Telos — openai/gpt-5-mini  [OPENAI_API_KEY: present]
-task t-2026-09-26T12-00-00-000Z-ab1c
-budgets: 80000 tokens · 40 tool calls · 900s wall
-Ctrl+C cancels the running task · Ctrl+C again exits · /help for commands
-
-> Fix the failing test in auth and verify the suite passes.
 ```
+
+Your key is stored once per machine in `~/.telos/credentials.json` (mode 600, outside every project) and picked up automatically in all your projects. Environment variables still win when set, so CI and shell exports keep working unchanged. Re-run `telos setup` any time to switch provider, endpoint, or key; `telos status` shows what's configured.
 
 Describe the work in plain language. Telos investigates, edits, runs commands, tests, and reports — and the Completion Gate decides when the task is actually done.
 
@@ -55,6 +67,7 @@ telos [command] [options]
 
 Commands:
   chat       Start an interactive session (default)
+  setup      Re-run the interactive setup (provider, endpoint, key, model)
   init       Write .project-agent/config.toml and exit
   status     Show configuration and environment readiness
   version    Print version
@@ -69,7 +82,7 @@ Options:
 
 ### Providers
 
-Any OpenAI-compatible endpoint works out of the box: OpenAI, OpenRouter, Ollama, vLLM, LM Studio, or a self-hosted gateway via `base_url`. A native Anthropic Messages API provider is included. Set `provider`, `name`, `base_url`, and `api_key_env` in `[model]` — or the `TELOS_*` environment equivalents.
+Any OpenAI-compatible endpoint works out of the box: OpenAI, OpenRouter, Ollama, vLLM, LM Studio, or a self-hosted gateway via `base_url`. A native Anthropic Messages API provider is included. The setup wizard covers the common cases (it even recognizes an endpoint and switches provider for you); for everything else, set `provider`, `name`, `base_url`, and `api_key_env` in `[model]` — or the `TELOS_*` environment equivalents.
 
 ---
 
