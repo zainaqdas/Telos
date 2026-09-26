@@ -603,7 +603,7 @@ export class ManagerLoop {
         output_tokens: u.outputTokens,
         cached_tokens: u.cachedTokens,
         total_tokens: u.totalTokens,
-        tool_calls: u.toolCalls,
+        tool_calls: this.deps.budget.used.toolCalls, // runtime count, not the provider echo
         cost_usd: u.costUsd,
         wall_ms: Date.now() - this.turnStartedAt,
         gate_verdict: gate?.verdict ?? null,

@@ -519,7 +519,7 @@ export class Orchestrator {
       events: this.deps.events,
       budget: this.deps.budget, // shared pools: workers and manager draw the same budget (Part 22)
       cancellation: session.cancellation, // per-worker scope: /stop kills this worker only
-      ctx: { ...this.deps.ctx, signal: session.cancellation.signal },
+      ctx: { ...this.deps.ctx, signal: session.cancellation.signal, cancellation: session.cancellation },
       learner: this.deps.learner,
       workerPromptOverride: {
         text:
