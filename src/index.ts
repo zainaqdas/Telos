@@ -3,7 +3,7 @@
  * CLI arg parsing (Part 5), phase-0 entry: launch, load config, status, exit.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, defaultConfigToml, STATE_DIRNAME, globalConfigDir } from "./config/loader.ts";
 import { ConfigError } from "./config/schema.ts";
@@ -113,7 +113,7 @@ async function main(): Promise<number> {
         return 0;
       case "version":
       case "--version":
-        console.log("telos 0.1.0");
+        console.log(`telos ${JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string}`);
         return 0;
       case "init":
         cmdInit();
@@ -124,6 +124,20 @@ async function main(): Promise<number> {
         return 0;
       case "chat": {
         applyFlagOverrides();
+        // First-run UX: bare `telos` in a project without config scaffolds
+        // .project-agent/config.toml instead of failing, then points at the
+        // two lines the user must fill in. Second run goes straight to chat.
+        const configPath = join(process.cwd(), STATE_DIRNAME, "config.toml");
+        if (!existsSync(configPath)) {
+          cmdInit();
+          console.error(
+            "\nNext steps:\n" +
+              "  1. set [model] name (or the TELOS_MODEL env var)\n" +
+              "  2. export the API key named by api_key_env\n" +
+              "  3. run `telos` again — this directory now remembers its config",
+          );
+          return 2;
+        }
         const cfg = loadConfig(process.cwd());
         if (!cfg.model.name) {
           console.error("No model configured. Set TELOS_MODEL or [model] name in .project-agent/config.toml.");
