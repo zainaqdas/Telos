@@ -49,7 +49,13 @@ export class EditJournal {
  * pre-edit content. The decoration is transparent to the registry: schema,
  * permission, risk, guard behavior, and result shape are untouched.
  */
-export function journalWriteTools(registry: ToolRegistry, journal: EditJournal): void {
+export function journalWriteTools(
+  registry: ToolRegistry,
+  journal: EditJournal,
+  /** Called before the session's first successful write (Scale Batch 3): the git snapshot hook. */
+  onFirstWrite?: () => void | Promise<void>,
+): void {
+  let snapshotTaken = false;
   for (const name of ["write_file", "edit_file"]) {
     const tool = registry.get(name);
     if (!tool) continue;
@@ -63,6 +69,14 @@ export function journalWriteTools(registry: ToolRegistry, journal: EditJournal):
             before = await readFile(join(ctx.root, pathArg), "utf8");
           } catch {
             before = ""; // created file (or unreadable — restoring "" is still safe)
+          }
+        }
+        if (!snapshotTaken) {
+          snapshotTaken = true;
+          try {
+            await onFirstWrite?.();
+          } catch {
+            /* snapshot is best-effort; never blocks the edit */
           }
         }
         const result = await tool.execute(args, ctx);

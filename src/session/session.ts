@@ -159,7 +159,9 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   // recent successful workspace write. Cleared on /new — a fresh task must
   // never undo edits belonging to the previous task.
   const journal = new EditJournal();
-  journalWriteTools(registry, journal);
+  journalWriteTools(registry, journal, async () => {
+    await gitSnapshot(opts.projectRoot);
+  });
 
   // MCP servers (Part 55): user-declared local stdio servers compiled into
   // the same registry. A server that fails to start is a notice, not a crash.
@@ -611,8 +613,17 @@ async function handleSlashCommand(
         out("(cannot undo while a task is running)");
         return;
       }
+      // Git-backed undo first (Scale Batch 3): restore the whole workspace to
+      // the snapshot taken at the start of this session's first write —
+      // catches renames/deletes the journal cannot represent. Falls back to
+      // the journal for non-git dirs.
+      const gitUndo = await gitUndoToSnapshot(deps.projectRoot);
+      if (gitUndo.restored) {
+        out(`[undone: workspace restored to snapshot ${gitUndo.snapshot.slice(0, 10)} — ${gitUndo.filesChanged} file(s) changed back]`);
+        return;
+      }
       const done = await undoLastEdit(deps.journal, deps.projectRoot);
-      out(done ? `[undone: ${done}]` : `(nothing to undo — journal is empty)`);
+      out(done ? `[undone: ${done}]` : `(nothing to undo — no git snapshot and the journal is empty)`);
       return;
     }
     case "retry": {
@@ -791,6 +802,10 @@ async function fetchModelList(model: { provider: string; baseUrl: string; apiKey
     return [];
   }
 }
+
+// Git-backed /undo lives in session-undo.ts (Scale Batch 3); re-exported for
+// the session wiring.
+import { gitSnapshot, gitUndoToSnapshot } from "./session-undo.ts";
 
 function out(text: string): void {
   process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);

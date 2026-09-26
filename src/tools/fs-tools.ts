@@ -166,15 +166,46 @@ export function registerFilesystemTools(registry: ToolRegistry): void {
       try {
         const p = safePath(ctx, String(args["path"] ?? ""));
         const before = await readFile(p, "utf8");
-        if (!before.includes(oldStr)) return fail("edit_file: old_string not found in file", "edit_not_found");
-        const occurrences = before.split(oldStr).length - 1;
-        if (count === 1 && occurrences > 1) {
-          return fail(`edit_file: old_string matches ${occurrences} times; include more context to disambiguate`, "edit_ambiguous");
+
+        // ── Edit resolution ladder (Aider's, ported; Scale Batch 3) ──
+        // 1. exact match (count-aware)
+        // 2. whitespace-normalized match (indentation drift)
+        // 3. blank-line-tolerant match
+        // 4. failure with the nearest-match line so the model can retry once.
+        let after: string | null = null;
+        let via = "exact";
+        if (before.includes(oldStr)) {
+          const occurrences = before.split(oldStr).length - 1;
+          if (count === 1 && occurrences > 1) {
+            return fail(`edit_file: old_string matches ${occurrences} times; include more surrounding lines to disambiguate`, "edit_ambiguous");
+          }
+          after = occurrences <= count ? before.split(oldStr).join(newStr) : replaceN(before, oldStr, newStr, count);
         }
-        const after = occurrences <= count ? before.split(oldStr).join(newStr) : replaceN(before, oldStr, newStr, count);
+        if (after === null && oldStr.trim().length > 0) {
+          const ws = matchWhitespace(before, oldStr);
+          if (ws) {
+            after = applyReplacement(before, ws.matchText, newStr); // keep old indentation? new_string is used verbatim
+            via = "whitespace-normalized";
+          }
+        }
+        if (after === null && oldStr.trim().length > 0) {
+          const blank = matchBlankLineTolerant(before, oldStr);
+          if (blank) {
+            after = applyReplacement(before, blank.matchText, newStr);
+            via = "blank-line-tolerant";
+          }
+        }
+        if (after === null) {
+          const hint = nearestMatchHint(before, oldStr);
+          return fail(`edit_file: old_string not found in file.${hint ? ` Closest match is at line ${hint.line} (${hint.delta} chars differ) — read that region with read_file offset ${Math.max(1, hint.line - 5)} and retry with the exact current text.` : " Read the file and retry with the exact current text."}`, "edit_not_found");
+        }
+
         await writeFile(p, after, "utf8");
         const d = lineDiff(before, after);
-        return ok(`edited ${relative(ctx.root, p)} (+${d.added}/-${d.removed})\n${d.preview}`, { path: relative(ctx.root, p) });
+        const viaNote = via === "exact" ? "" : ` (matched via ${via})`;
+        const syntax = await syntaxCheck(p, after);
+        const syntaxNote = syntax === null ? "" : syntax.ok ? "\nsyntax: OK" : `\nsyntax: SUSPECT — ${syntax.detail}`;
+        return ok(`edited ${relative(ctx.root, p)} (+${d.added}/-${d.removed})${viaNote}${syntaxNote}\n${d.preview}`, { path: relative(ctx.root, p), matchedVia: via, syntax: syntax?.ok });
       } catch (err) {
         return fail(`edit_file failed: ${(err as Error).message}`, "io_error");
       }
@@ -292,6 +323,186 @@ function replaceN(text: string, oldStr: string, newStr: string, n: number): stri
     rest = rest.slice(idx + oldStr.length);
   }
   return out + rest;
+}
+
+// ─── Edit ladder helpers (Scale Batch 3; Aider's ladder, ported) ─────────────
+
+/** Replace the FIRST occurrence of matchText with newStr (count>1 not needed on fuzzy paths). */
+function applyReplacement(text: string, matchText: string, newStr: string): string {
+  const idx = text.indexOf(matchText);
+  if (idx === -1) return text;
+  return text.slice(0, idx) + newStr + text.slice(idx + matchText.length);
+}
+
+/**
+ * Whitespace-normalized match: find oldStr ignoring per-line leading/trailing
+ * whitespace differences. Returns the actual matched text from the file (so
+ * the replacement splices out the real region), or null. Refuses ambiguous
+ * multi-matches on the exact-one path.
+ */
+function matchWhitespace(before: string, oldStr: string): { matchText: string } | null {
+  const norm = (s: string): string =>
+    s
+      .split("\n")
+      .map((l) => l.trim())
+      .join("\n");
+  const target = norm(oldStr);
+  if (!target) return null;
+  const fileLines = before.split("\n");
+  const needleLines = oldStr.split("\n");
+  const matches: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i + needleLines.length <= fileLines.length; i++) {
+    let j = 0;
+    while (j < needleLines.length && fileLines[i + j]!.trim() === needleLines[j]!.trim()) j++;
+    if (j === needleLines.length) {
+      matches.push({ start: i, end: i + needleLines.length });
+      if (matches.length > 1) return null; // ambiguous even fuzzily
+    }
+  }
+  if (matches.length !== 1) return null;
+  const { start, end } = matches[0]!;
+  return { matchText: fileLines.slice(start, end).join("\n") };
+}
+
+/** Blank-line-tolerant match: like whitespace match but empty needle lines match any line gap. */
+function matchBlankLineTolerant(before: string, oldStr: string): { matchText: string } | null {
+  const needleLines = oldStr.split("\n");
+  if (!needleLines.some((l) => l.trim() === "")) return null; // only helps when blanks exist
+  const fileLines = before.split("\n");
+  const matches: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < fileLines.length; i++) {
+    let fi = i;
+    let j = 0;
+    while (j < needleLines.length && fi < fileLines.length) {
+      const want = needleLines[j]!.trim();
+      if (want === "") {
+        j++;
+        continue; // blank needle line: skip (matches zero or more lines)
+      }
+      if (fileLines[fi]!.trim() === want) {
+        fi++;
+        j++;
+      } else if (fileLines[fi]!.trim() === "") {
+        fi++; // skip blank file lines the needle didn't mention
+      } else {
+        break;
+      }
+    }
+    while (j < needleLines.length && needleLines[j]!.trim() === "") j++;
+    if (j === needleLines.length) {
+      matches.push({ start: i, end: fi });
+      if (matches.length > 1) return null;
+    }
+  }
+  if (matches.length !== 1) return null;
+  const { start, end } = matches[0]!;
+  return { matchText: fileLines.slice(start, end).join("\n") };
+}
+
+/** Line of the closest match (by Levenshtein on trimmed lines) for the retry hint. */
+function nearestMatchHint(before: string, oldStr: string): { line: number; delta: number } | null {
+  const needle = oldStr.split("\n")[0]!.trim();
+  if (needle.length < 8) return null; // too short to hint meaningfully
+  const lines = before.split("\n");
+  let best: { line: number; delta: number } | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const cand = lines[i]!.trim();
+    if (!cand) continue;
+    const delta = levenshtein(cand, needle);
+    if (best === null || delta < best.delta) best = { line: i + 1, delta };
+  }
+  if (!best) return null;
+  // Only hint when it is plausibly the same line (edit distance below 40%).
+  return best.delta <= Math.max(12, needle.length * 0.4) ? best : null;
+}
+
+function levenshtein(a: string, b: string): number {
+  if (a === b) return 0;
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n]!;
+}
+
+export interface SyntaxCheckResult {
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Post-edit syntax check (Scale Batch 3; Aider lint_edited / OpenCode LSP
+ * diagnostics, zero-dep edition). node --check for JS-family files, JSON.parse
+ * for .json, brace-balance heuristic (warning-grade) for other text files.
+ * Returns null for non-checkable files.
+ */
+export async function syntaxCheck(path: string, content: string): Promise<SyntaxCheckResult | null> {
+  const ext = path.slice(path.lastIndexOf(".")).toLowerCase();
+  if (ext === ".json") {
+    try {
+      JSON.parse(content);
+      return { ok: true, detail: "json parse ok" };
+    } catch (err) {
+      return { ok: false, detail: `json parse failed: ${(err as Error).message.slice(0, 120)}` };
+    }
+  }
+  if (ext === ".js" || ext === ".mjs" || ext === ".cjs") {
+    const { writeFile, rm } = await import("node:fs/promises");
+    const { spawnSync } = await import("node:child_process");
+    const tmp = join(path, "..");
+    void tmp;
+    const tmpFile = `${path}.telos-check-${Date.now().toString(36)}.js`;
+    try {
+      await writeFile(tmpFile, content, "utf8");
+      const res = spawnSync("node", ["--check", tmpFile], { encoding: "utf8", timeout: 5_000 });
+      if (res.status === 0) return { ok: true, detail: "node --check ok" };
+      const msg = (res.stderr || res.stdout || "syntax error").split("\n").slice(0, 3).join(" ").slice(0, 160);
+      return { ok: false, detail: msg };
+    } catch (err) {
+      return { ok: false, detail: `check failed: ${(err as Error).message.slice(0, 120)}` };
+    } finally {
+      await rm(tmpFile, { force: true }).catch(() => {});
+    }
+  }
+  // .ts/.tsx cannot be node --check'd without a compiler; brace-balance is a
+  // cheap suspect-detector (warning-grade, never blocks the edit).
+  if (ext === ".ts" || ext === ".tsx" || ext === ".jsx") {
+    return balanceCheck(content, ["(", ")", "{", "}", "[", "]"]);
+  }
+  if (ext === ".css" || ext === ".scss") return balanceCheck(content, ["{", "}"]);
+  return null;
+}
+
+function balanceCheck(content: string, pairs: string[]): SyntaxCheckResult | null {
+  // Strip line comments, block comments and string literals crudely — enough
+  // for a balance heuristic without pulling in a parser.
+  const stripped = content
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1")
+    .replace(/"(?:\\.|[^"\\\n])*"/g, '"')
+    .replace(/'(?:\\.|[^'\\\n])*'/g, "'")
+    .replace(/`(?:\\.|[^`\\])*`/g, "`");
+  const opens: Record<string, string> = { "(": ")", "{": "}", "[": "]" };
+  const closes: Record<string, string> = { ")": "(", "}": "{", "]": "[" };
+  const stack: string[] = [];
+  for (const ch of stripped) {
+    if (opens[ch]) stack.push(ch);
+    else if (closes[ch]) {
+      if (pairs.includes(ch) && stack.pop() !== closes[ch]) {
+        return { ok: false, detail: "unbalanced delimiters (possible truncated edit)" };
+      }
+    }
+  }
+  if (stack.length > 0) return { ok: false, detail: `${stack.length} unclosed "${stack[stack.length - 1]}" (possible truncated edit)` };
+  return { ok: true, detail: "balanced" };
 }
 
 /** NUL-byte sniff on the first 8KB — cheap binary detection. */
