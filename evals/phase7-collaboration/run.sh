@@ -133,8 +133,8 @@ EOF
 # ── Drive ─────────────────────────────────────────────────────────────────────
 export SYN_EVAL_KEY="$(cat /tmp/.syn_eval_key)"
 # Headroom so the eval measures behavior, not budget arithmetic.
-export SYNERGON_MAX_TOOL_CALLS=90
-export SYNERGON_MAX_TOKENS=500000
+export TELOS_MAX_TOOL_CALLS=90
+export TELOS_MAX_TOKENS=500000
 
 rm -f "$FIFO"
 mkfifo "$FIFO"

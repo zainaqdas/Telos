@@ -16,7 +16,7 @@ import { EventLog } from "../src/events/log.ts";
 import { CompletionGate } from "../src/gate/gate.ts";
 import { ManagerLoop } from "../src/manager/loop.ts";
 import { reduce } from "../src/events/state.ts";
-import type { SynergonConfig } from "../src/config/schema.ts";
+import type { TelosConfig } from "../src/config/schema.ts";
 
 // ─── Store basics ─────────────────────────────────────────────────────────────
 
@@ -135,7 +135,7 @@ class FakeProvider implements Provider {
   }
 }
 
-function fakeConfig(): SynergonConfig {
+function fakeConfig(): TelosConfig {
   return {
     model: { provider: "openai", name: "fake-1", baseUrl: "", apiKeyEnv: "NOOP", temperature: 0, maxTokens: 1024 },
     runtime: {

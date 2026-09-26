@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseToml } from "./toml.ts";
-import { parseConfig, type SynergonConfig } from "./schema.ts";
+import { parseConfig, type TelosConfig } from "./schema.ts";
 
 export const STATE_DIRNAME = ".project-agent";
 
@@ -33,7 +33,7 @@ function BunStat(dir: string): boolean {
 }
 
 /** Layer: built-in defaults → config file → environment overrides. */
-export function loadConfig(projectRoot: string): SynergonConfig {
+export function loadConfig(projectRoot: string): TelosConfig {
   const configPath = join(projectRoot, STATE_DIRNAME, "config.toml");
   let fileRoot: Record<string, unknown> = {};
   try {
@@ -47,18 +47,18 @@ export function loadConfig(projectRoot: string): SynergonConfig {
   // bare environment works without editing config.
   const env = process.env;
   const m = config.model;
-  if (!m.name && env["SYNERGON_MODEL"]) m.name = env["SYNERGON_MODEL"];
-  if (!m.baseUrl && env["SYNERGON_BASE_URL"]) m.baseUrl = env["SYNERGON_BASE_URL"];
-  if (env["SYNERGON_PROVIDER"] && ["openai", "anthropic", "openai-compatible", "openrouter", "ollama"].includes(env["SYNERGON_PROVIDER"])) {
-    m.provider = env["SYNERGON_PROVIDER"] as typeof m.provider;
+  if (!m.name && env["TELOS_MODEL"]) m.name = env["TELOS_MODEL"];
+  if (!m.baseUrl && env["TELOS_BASE_URL"]) m.baseUrl = env["TELOS_BASE_URL"];
+  if (env["TELOS_PROVIDER"] && ["openai", "anthropic", "openai-compatible", "openrouter", "ollama"].includes(env["TELOS_PROVIDER"])) {
+    m.provider = env["TELOS_PROVIDER"] as typeof m.provider;
   }
   const r = config.runtime;
   const intOverrides: Array<[keyof RuntimeConfig, string]> = [
-    ["maxTotalTokens", "SYNERGON_MAX_TOKENS"],
-    ["maxToolCalls", "SYNERGON_MAX_TOOL_CALLS"],
-    ["maxWallTimeSeconds", "SYNERGON_MAX_WALL_TIME"],
-    ["minTestCount", "SYNERGON_MIN_TEST_COUNT"],
-    ["streamTimeoutSeconds", "SYNERGON_STREAM_TIMEOUT"],
+    ["maxTotalTokens", "TELOS_MAX_TOKENS"],
+    ["maxToolCalls", "TELOS_MAX_TOOL_CALLS"],
+    ["maxWallTimeSeconds", "TELOS_MAX_WALL_TIME"],
+    ["minTestCount", "TELOS_MIN_TEST_COUNT"],
+    ["streamTimeoutSeconds", "TELOS_STREAM_TIMEOUT"],
   ];
   for (const [key, envName] of intOverrides) {
     const v = Number(env[envName]);
@@ -71,12 +71,12 @@ type RuntimeConfig = import("./schema.ts").RuntimeConfig;
 
 /** Default config file contents written on first run. */
 export function defaultConfigToml(): string {
-  return `# Synergon configuration. Overrides via environment: SYNERGON_* variables.
+  return `# Telos configuration. Overrides via environment: TELOS_* variables.
 
 [model]
 provider = "openai"            # openai | anthropic | openai-compatible | openrouter | ollama
-name = ""                      # e.g. gpt-5-mini; or set SYNERGON_MODEL
-base_url = ""                  # optional override; or set SYNERGON_BASE_URL
+name = ""                      # e.g. gpt-5-mini; or set TELOS_MODEL
+base_url = ""                  # optional override; or set TELOS_BASE_URL
 api_key_env = "OPENAI_API_KEY" # BYOK: name of env var holding the key
 
 [runtime]
@@ -99,5 +99,5 @@ block_secrets = true
 
 /** Home directory for global skills (used in later phases). */
 export function globalConfigDir(): string {
-  return join(homedir(), ".synergon");
+  return join(homedir(), ".telos");
 }

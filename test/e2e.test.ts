@@ -49,9 +49,9 @@ test("e2e: chat session completes a read-only instruction via mock provider", as
     cwd: dir,
     env: {
       ...process.env,
-      SYNERGON_PROVIDER: "openai",
-      SYNERGON_MODEL: "mock-1",
-      SYNERGON_BASE_URL: `http://127.0.0.1:${port}`,
+      TELOS_PROVIDER: "openai",
+      TELOS_MODEL: "mock-1",
+      TELOS_BASE_URL: `http://127.0.0.1:${port}`,
       OPENAI_API_KEY: "sk-test-key-not-real-000",
     },
     stdio: ["pipe", "pipe", "pipe"],

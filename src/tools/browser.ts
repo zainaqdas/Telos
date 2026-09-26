@@ -41,8 +41,8 @@ function result(ok: boolean, output: string, meta?: Record<string, unknown>, err
   return { ok, output, meta, errorCategory };
 }
 
-const BROWSER_CANDIDATES = process.env["SYNERGON_BROWSER"]
-  ? [process.env["SYNERGON_BROWSER"]]
+const BROWSER_CANDIDATES = process.env["TELOS_BROWSER"]
+  ? [process.env["TELOS_BROWSER"]]
   : ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome", "msedge", "brave-browser"];
 
 /** Find a usable Chromium-family browser binary. */
@@ -76,7 +76,7 @@ async function launchBrowser(ctx: ToolExecContext, url: string): Promise<{ port:
   const bin = await findBrowser();
   if (!bin) {
     throw new Error(
-      "no Chromium-based browser found (looked for: " + BROWSER_CANDIDATES.filter(Boolean).join(", ") + "). Install Chrome/Chromium or set SYNERGON_BROWSER=/path/to/chrome",
+      "no Chromium-based browser found (looked for: " + BROWSER_CANDIDATES.filter(Boolean).join(", ") + "). Install Chrome/Chromium or set TELOS_BROWSER=/path/to/chrome",
     );
   }
   const child = spawn(bin, ["--headless=new", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--user-data-dir=" + join(ctx.root, ".project-agent", "cache", "browser-profile"), url], {

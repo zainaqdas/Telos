@@ -1,5 +1,5 @@
 /**
- * Minimal TOML-subset parser for Synergon config files.
+ * Minimal TOML-subset parser for Telos config files.
  * Supports [sections], string/number/boolean/array values, # comments.
  * Deliberately small — full TOML is out of scope for v1; malformed input throws.
  */

@@ -31,9 +31,9 @@ browser_launch(user-supplied executable path or env override)
 Key properties:
 
 - **No dependencies.** `spawn`, `fetch`, `WebSocket` — all Node built-ins.
-- **The user's own browser.** Synergon never downloads a browser; it looks for
+- **The user's own browser.** Telos never downloads a browser; it looks for
   `google-chrome`, `chromium`, `chrome`, or `msedge` on PATH (or the
-  `SYNERGON_BROWSER` env var). Browsers are near-universal; the tool fails
+  `TELOS_BROWSER` env var). Browsers are near-universal; the tool fails
   with a clear, actionable message when none exists.
 - **One browser per session**, launched lazily on first `browser_*` call,
   killed on session end (tracked by the CancellationController — no orphans,

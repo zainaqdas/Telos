@@ -41,9 +41,9 @@ test("config defaults apply and validation rejects bad enums", () => {
 test("environment overrides layer over file config", () => {
   const saved = { ...process.env };
   try {
-    process.env["SYNERGON_MODEL"] = "env-model";
-    process.env["SYNERGON_MAX_TOKENS"] = "1234";
-    process.env["SYNERGON_PROVIDER"] = "openrouter";
+    process.env["TELOS_MODEL"] = "env-model";
+    process.env["TELOS_MAX_TOKENS"] = "1234";
+    process.env["TELOS_PROVIDER"] = "openrouter";
     const cfg = loadConfig(process.cwd()); // no file in repo root → defaults
     assert.equal(cfg.model.name, "env-model");
     assert.equal(cfg.runtime.maxTotalTokens, 1234);

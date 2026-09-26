@@ -43,7 +43,7 @@ Legend: ✅ implemented + tested · 🌐 live-verified against a real provider �
 | 67 | Session history | ✅ | JSONL event logs per task under .project-agent/events/, replayable by the reducer |
 | 68 | Context compaction | ✅ | /compact + automatic threshold; reducer-built digest preserves corrections/blockers/objections |
 | 69–70 | Project file layout, configuration | ✅ | .project-agent/{config.toml,events,memory,skills}; TOML subset parser |
-| 71 | Global + project skills, precedence | ✅ | builtin → ~/.synergon/skills → project; project wins; documented |
+| 71 | Global + project skills, precedence | ✅ | builtin → ~/.telos/skills → project; project wins; documented |
 | 72–79 | Evaluation philosophy + mandatory scenarios | ✅ 🌐 | evals/scenarios (P74 correction, P76 repetition, P77 gate, P78 budget, P79 cancellation) + 4 live harnesses (collaboration/commands/web/MCP) |
 | 80–83 | Acceptance tasks (tiny/research/complex/skill) | ⚠️ | covered by unit + scenario equivalents (skill-acceptance = gate BLOCKED test exists); **no dedicated live eval dir replicating Parts 80–83 verbatim prompts** |
 | 84–96 | Phase roadmap 0–11 | ✅ 🌐 | all phases implemented; docs/PHASES.md reports; measure-first doctrine honored (bench before opt) |

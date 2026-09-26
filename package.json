@@ -1,10 +1,10 @@
 {
-  "name": "synergon",
+  "name": "telos",
   "version": "0.1.0",
   "description": "Terminal-native agentic coding CLI: persistent manager, evidence-based completion gate, hard runtime budgets.",
   "type": "module",
   "engines": { "node": ">=22" },
-  "bin": { "synergon": "./src/index.ts" },
+  "bin": { "telos": "./src/index.ts" },
   "scripts": {
     "start": "node src/index.ts",
     "typecheck": "tsc --noEmit",

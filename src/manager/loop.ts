@@ -11,7 +11,7 @@ import { reduce } from "../events/state.ts";
 import type { TeamState } from "../events/types.ts";
 import type { CompletionGate, GateReport } from "../gate/gate.ts";
 import type { StateStore } from "../events/state-store.ts";
-import type { SynergonConfig } from "../config/schema.ts";
+import type { TelosConfig } from "../config/schema.ts";
 import type { SkillRouter } from "../skills/router.ts";
 import { FailureLearner } from "../memory/pipeline.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
@@ -25,7 +25,7 @@ import { buildSystemPrompt } from "./system-prompt.ts";
 export interface ManagerDeps {
   provider: Provider;
   model: string;
-  config: SynergonConfig;
+  config: TelosConfig;
   registry: ToolRegistry;
   events: EventLog;
   budget: BudgetEnforcer;

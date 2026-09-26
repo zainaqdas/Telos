@@ -2,7 +2,7 @@ import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadConfig, STATE_DIRNAME } from "../config/loader.ts";
-import type { SynergonConfig } from "../config/schema.ts";
+import type { TelosConfig } from "../config/schema.ts";
 import { createProvider, resolveApiKey } from "../providers/index.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { registerFilesystemTools } from "../tools/fs-tools.ts";
@@ -190,7 +190,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     compaction: { thresholdTokens: config.runtime.compactionThresholdTokens ?? 60_000, eventSource: () => events.readAll() },
     onNotice: (text) => {
       if (text.startsWith("Runtime lesson")) out(`  ℹ ${text.slice(0, 140)}`);
-      else if (text.startsWith("PROJECT MEMORY") && process.env["SYNERGON_DEBUG_MEMORY"] === "1") {
+      else if (text.startsWith("PROJECT MEMORY") && process.env["TELOS_DEBUG_MEMORY"] === "1") {
         out(`  ℹ memory injected:`);
         for (const line of text.split("\n").slice(1)) out(`    ${line.slice(0, 130)}`);
       }
@@ -439,7 +439,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 async function handleSlashCommand(
   line: string,
   deps: {
-    config: SynergonConfig;
+    config: TelosConfig;
     budget: BudgetEnforcer;
     events: EventLog;
     manager: ManagerLoop;
@@ -517,7 +517,7 @@ async function handleSlashCommand(
         "/model [name]    show the configured model, or switch to <name> (validated against the endpoint catalog)",
         "/stop [id]       list live workers, or stop one worker's stream and children (session keeps running)",
         "/stop-workers    stop every live worker",
-        "/exit            quit Synergon",
+        "/exit            quit Telos",
       ].join("\n"));
       return;
     case "status": {
@@ -778,11 +778,11 @@ function out(text: string): void {
   process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
 }
 
-function printBanner(config: SynergonConfig, taskId: string): void {
+function printBanner(config: TelosConfig, taskId: string): void {
   const keyEnv = config.model.apiKeyEnv;
   const hasKey = Boolean(process.env[keyEnv]);
   out([
-    `Synergon — ${config.model.provider}/${config.model.name || "(model unset)"}  [${keyEnv}: ${hasKey ? "present" : "MISSING"}]`,
+    `Telos — ${config.model.provider}/${config.model.name || "(model unset)"}  [${keyEnv}: ${hasKey ? "present" : "MISSING"}]`,
     `task ${taskId}`,
     `budgets: ${config.runtime.maxTotalTokens} tokens · ${config.runtime.maxToolCalls} tool calls · ${config.runtime.maxWallTimeSeconds}s wall`,
     `Ctrl+C cancels the running task · Ctrl+C again exits · /help for commands`,

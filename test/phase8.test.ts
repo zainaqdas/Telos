@@ -14,7 +14,7 @@ import { EventLog } from "../src/events/log.ts";
 import { CompletionGate } from "../src/gate/gate.ts";
 import { ManagerLoop } from "../src/manager/loop.ts";
 import { decodeEntities, parseDuckDuckGoLite, normalizeDuckUrl, extractReadableText, extractTitle } from "../src/tools/web.ts";
-import type { SynergonConfig } from "../src/config/schema.ts";
+import type { TelosConfig } from "../src/config/schema.ts";
 
 // ─── Web parsers (deterministic, no network) ─────────────────────────────────
 
@@ -83,7 +83,7 @@ class FakeProvider implements Provider {
   }
 }
 
-function config(): SynergonConfig {
+function config(): TelosConfig {
   return {
     model: { provider: "openai", name: "fake-1", baseUrl: "", apiKeyEnv: "NOOP", temperature: 0, maxTokens: 1024 },
     runtime: {
@@ -139,9 +139,9 @@ test("vision model receives image parts; non-vision model gets a notice instead"
 test("browser tools fail with structured, actionable errors when no browser exists", async () => {
   const dir = mkdtempSync(join(tmpdir(), "syn-p8br-"));
   try {
-    // This environment has no Chromium on PATH (verified); SYNERGON_BROWSER
+    // This environment has no Chromium on PATH (verified); TELOS_BROWSER
     // points at a nonexistent binary to make the absence deterministic.
-    process.env["SYNERGON_BROWSER"] = "/nonexistent/synergon-fake-chrome";
+    process.env["TELOS_BROWSER"] = "/nonexistent/telos-fake-chrome";
     const { registerBrowserTools } = await import("../src/tools/browser.ts");
     const registry = new ToolRegistry();
     registerBrowserTools(registry, { cancellation: new CancellationController() });
@@ -156,7 +156,7 @@ test("browser tools fail with structured, actionable errors when no browser exis
     const res2 = await shot.execute({}, ctx);
     assert.equal(res2.ok, false);
     assert.match(res2.output, /no browser open/);
-    delete process.env["SYNERGON_BROWSER"];
+    delete process.env["TELOS_BROWSER"];
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

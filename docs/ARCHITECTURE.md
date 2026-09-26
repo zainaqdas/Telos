@@ -1,4 +1,4 @@
-# Synergon Architecture — Evaluation After Phase 2
+# Telos Architecture — Evaluation After Phase 2
 
 Per the master build instruction: Phases 0–2 are implemented, verified, and frozen. This document evaluates the architecture against real tasks before Phase 3 (Skill Engine) begins.
 

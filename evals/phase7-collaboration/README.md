@@ -61,5 +61,5 @@ FAIL). An auditor that cannot detect a broken log is not an auditor.
 ## Configuration
 
 Model/provider and budgets come from the staged `.project-agent/config.toml`;
-`SYNERGON_MAX_TOOL_CALLS` / `SYNERGON_MAX_TOKENS` env overrides give headroom
+`TELOS_MAX_TOOL_CALLS` / `TELOS_MAX_TOKENS` env overrides give headroom
 so the eval measures behavior, not budget arithmetic.

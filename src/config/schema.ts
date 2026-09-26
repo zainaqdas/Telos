@@ -95,7 +95,7 @@ export interface SecurityConfig {
   blockSecrets: boolean;
 }
 
-export interface SynergonConfig {
+export interface TelosConfig {
   model: ModelConfig;
   runtime: RuntimeConfig;
   security: SecurityConfig;
@@ -115,7 +115,7 @@ function parsePricing(model: Record<string, unknown>): { pricing?: { inputPerMto
   return { pricing: { inputPerMtok: input, outputPerMtok: output, cacheReadPerMtok: cache } };
 }
 
-export function parseConfig(root: Record<string, unknown>): SynergonConfig {
+export function parseConfig(root: Record<string, unknown>): TelosConfig {
   const model = expectObject(root["model"], "[model]");
   const runtime = expectObject(root["runtime"], "[runtime]");
   const security = expectObject(root["security"], "[security]");

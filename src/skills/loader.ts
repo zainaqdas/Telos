@@ -8,11 +8,11 @@ import { BUILTIN_SKILLS } from "./builtins.ts";
 /**
  * Skill discovery (Parts 34, 70–71). Skills are TOML files containing
  * [[skill]] tables. Sources, in ascending precedence:
- *   builtin → global (~/.synergon/skills/) → project (.project-agent/skills/)
+ *   builtin → global (~/.telos/skills/) → project (.project-agent/skills/)
  * A project skill with the same name as a global/builtin one wins (Part 71).
  */
 
-export function loadSkills(projectRoot: string, globalDir = join(homedir(), ".synergon", "skills")): SkillDefinition[] {
+export function loadSkills(projectRoot: string, globalDir = join(homedir(), ".telos", "skills")): SkillDefinition[] {
   const byName = new Map<string, SkillDefinition>();
 
   const ingest = (raw: unknown, source: SkillDefinition["source"], file: string): void => {

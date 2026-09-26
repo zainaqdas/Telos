@@ -17,7 +17,7 @@ import { loadSkills } from "../src/skills/loader.ts";
 import { SkillRouter } from "../src/skills/router.ts";
 import { validateSkill } from "../src/skills/schema.ts";
 import { reduce } from "../src/events/state.ts";
-import type { SynergonConfig } from "../src/config/schema.ts";
+import type { TelosConfig } from "../src/config/schema.ts";
 
 // ─── Schema validation ────────────────────────────────────────────────────────
 
@@ -155,7 +155,7 @@ class FakeProvider implements Provider {
   }
 }
 
-function fakeConfig(): SynergonConfig {
+function fakeConfig(): TelosConfig {
   return {
     model: { provider: "openai", name: "fake-1", baseUrl: "", apiKeyEnv: "NOOP", temperature: 0, maxTokens: 1024 },
     runtime: {

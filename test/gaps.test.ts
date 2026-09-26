@@ -13,7 +13,7 @@ import { EventLog } from "../src/events/log.ts";
 import { reduce } from "../src/events/state.ts";
 import { ManagerLoop } from "../src/manager/loop.ts";
 import { Orchestrator } from "../src/workers/orchestrator.ts";
-import type { SynergonConfig } from "../src/config/schema.ts";
+import type { TelosConfig } from "../src/config/schema.ts";
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ function scriptedProvider(text: string, delayMs = 0): Provider {
   };
 }
 
-function baseConfig(): SynergonConfig {
+function baseConfig(): TelosConfig {
   return {
     model: { provider: "openai-compatible", name: "test-model", baseUrl: "", apiKeyEnv: "X" },
     runtime: {
@@ -46,7 +46,7 @@ function baseConfig(): SynergonConfig {
       maxStreamAttempts: 2,
     },
     security: { confirmDestructive: false },
-  } as unknown as SynergonConfig;
+  } as unknown as TelosConfig;
 }
 
 // ─── Gap 4: turn_summary + tool_call_id ──────────────────────────────────────

@@ -8,7 +8,7 @@ import { mcpWorkerTools } from "../mcp/tools.ts";
 import { ManagerLoop } from "../manager/loop.ts";
 import type { Provider } from "../providers/types.ts";
 import type { ToolExecContext } from "../tools/registry.ts";
-import type { SynergonConfig } from "../config/schema.ts";
+import type { TelosConfig } from "../config/schema.ts";
 import { CancellationController } from "../runtime/cancellation.ts";
 import type { FailureLearner } from "../memory/pipeline.ts";
 
@@ -30,7 +30,7 @@ import type { FailureLearner } from "../memory/pipeline.ts";
 export interface OrchestratorDeps {
   provider: Provider;
   model: string;
-  config: SynergonConfig;
+  config: TelosConfig;
   registry: ToolRegistry;
   events: EventLog;
   budget: BudgetEnforcer;

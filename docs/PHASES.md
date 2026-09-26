@@ -1,4 +1,4 @@
-# Synergon — Phase Reports
+# Telos — Phase Reports
 
 ## Phase 12 — Compliance Gap Closure (Parts 61, 62, 66)
 
@@ -247,7 +247,7 @@ Also fixed: partially streamed assistant text was discarded on mid-stream cancel
 **Implemented**
 
 - Skill schema (validated, normalized): metadata, triggers, framework/file/command evidence, checklists, constraints with severity (`advisory | required | blocking`) — validation rejects constraints referencing unknown checklist items (Parts 34, 37–38)
-- Loader with precedence: builtin → global (`~/.synergon/skills/*.toml`) → project (`.project-agent/skills/*.toml`); malformed skills degrade to warnings, never block the session (Part 71)
+- Loader with precedence: builtin → global (`~/.telos/skills/*.toml`) → project (`.project-agent/skills/*.toml`); malformed skills degrade to warnings, never block the session (Part 71)
 - Two built-in skills: `test-first-bugfix` (reproduce → fix → verify, with a blocking no-blind-edit constraint) and `db-migration-safety`
 - Deterministic-first routing: explicit name > trigger > file-pattern > framework > command evidence, threshold-gated, capped at 3 activations; ambiguity-classifier hook present and unused (Part 35)
 - Activation emits `skill_activated` + checklist `requirement_added` events — the Completion Gate enforces skill checklists exactly like user requirements; activation is idempotent per task (Part 37)
@@ -260,7 +260,7 @@ Also fixed: partially streamed assistant text was discarded on mid-stream cancel
 
 **Verified** — full suite green (50 tests), strict typecheck clean.
 
-**Failed / learned** — the TOML subset lacked array-of-tables (`[[skill]]`) support, so every skill file silently failed to parse (caught by the precedence test); skill files now parse. Deeper find: spawned shells inherited `NODE_TEST_CONTEXT` when Synergon itself ran under `node --test`, making an inner `node --test` exit 0 without executing assertions — a false-green that would have broken verification everywhere. The shell tool now strips test-runner env markers from children. Also: verification classification now examines the command string itself (a bare `node --test` never prints the word "test").
+**Failed / learned** — the TOML subset lacked array-of-tables (`[[skill]]`) support, so every skill file silently failed to parse (caught by the precedence test); skill files now parse. Deeper find: spawned shells inherited `NODE_TEST_CONTEXT` when Telos itself ran under `node --test`, making an inner `node --test` exit 0 without executing assertions — a false-green that would have broken verification everywhere. The shell tool now strips test-runner env markers from children. Also: verification classification now examines the command string itself (a bare `node --test` never prints the word "test").
 
 **Remaining** — ambiguity classifier activation (needs a real workload), skill-defined verification commands to replace shell heuristics, evaluation harness for skill recall/precision (Parts 72–74).
 
@@ -270,8 +270,8 @@ Also fixed: partially streamed assistant text was discarded on mid-stream cancel
 
 **Implemented**
 
-- TypeScript + Node CLI (`synergon`), zero runtime dependencies; native type-stripping instead of a build step
-- Layered configuration: defaults → `.project-agent/config.toml` (minimal TOML parser) → `SYNERGON_*` env vars
+- TypeScript + Node CLI (`telos`), zero runtime dependencies; native type-stripping instead of a build step
+- Layered configuration: defaults → `.project-agent/config.toml` (minimal TOML parser) → `TELOS_*` env vars
 - Event-sourced core: append-only JSONL `EventLog` → pure reducer → derived `TeamState` (Part 14)
 - Provider abstraction with explicit capabilities; one OpenAI-compatible streaming provider path (SSE, tool-call assembly, usage, abort) (Parts 52–53)
 - Hard budgets: tokens, tool calls, worker spawns, parallel workers, wall clock — checked by the runtime before every spend (Parts 22–23)
@@ -281,7 +281,7 @@ Also fixed: partially streamed assistant text was discarded on mid-stream cancel
 
 **Tested** — budget projection math, TOML parsing, config layering, event log append + torn-line recovery, reducer projections (requirements, correction invalidation, budget_exceeded), provider SSE parsing against a local HTTP server, and the mandatory no-orphan cancellation acceptance test (child + grandchild processes both terminated).
 
-**Verified** — `synergon init/status/version/help` run end-to-end; env overrides reach the runtime; typecheck clean.
+**Verified** — `telos init/status/version/help` run end-to-end; env overrides reach the runtime; typecheck clean.
 
 **Failed / learned** — `erasableSyntaxOnly` forbids parameter properties (rewrote several classes); a naive `current = current[k]` aliasing bug in the TOML section parser produced nested-table corruption; budget checks must use one injected clock, not a mix of injected and real time.
 

@@ -23,7 +23,7 @@ import { EventLog } from "../../src/events/log.ts";
 import { reduce } from "../../src/events/state.ts";
 import { CompletionGate } from "../../src/gate/gate.ts";
 import { ManagerLoop } from "../../src/manager/loop.ts";
-import type { SynergonConfig } from "../../src/config/schema.ts";
+import type { TelosConfig } from "../../src/config/schema.ts";
 
 interface Turn {
   chunks: Array<StreamChunk>;
@@ -55,7 +55,7 @@ const call = (id: string, name: string, args: Record<string, unknown>): StreamCh
 });
 const say = (text: string): StreamChunk => ({ type: "text_delta", text });
 
-function config(): SynergonConfig {
+function config(): TelosConfig {
   return {
     model: { provider: "openai", name: "scripted-1", baseUrl: "", apiKeyEnv: "NOOP", temperature: 0, maxTokens: 1024 },
     runtime: {

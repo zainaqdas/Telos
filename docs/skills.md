@@ -1,4 +1,4 @@
-# Synergon Skills — Format Guide
+# Telos Skills — Format Guide
 
 A skill is **operational infrastructure**, not documentation the model may or may not remember. When a skill activates, three things happen mechanically:
 
@@ -15,7 +15,7 @@ Skill files are TOML. No build step, no plugin system.
 | Source | Location | Precedence |
 |---|---|---|
 | Built-in | compiled into the binary | lowest |
-| Global | `~/.synergon/skills/*.toml` | middle |
+| Global | `~/.telos/skills/*.toml` | middle |
 | Project | `<repo>/.project-agent/skills/*.toml` | highest |
 
 A skill with the same `name` in a higher-precedence source fully replaces lower ones. Check with `/skills` in a session — each entry is tagged with its `[source]`.

@@ -1,5 +1,5 @@
 /**
- * Synergon — terminal-native agentic coding CLI.
+ * Telos — terminal-native agentic coding CLI.
  * CLI arg parsing (Part 5), phase-0 entry: launch, load config, status, exit.
  */
 
@@ -35,10 +35,10 @@ function parseArgs(argv: string[]): Parsed {
   return { command, args, flags };
 }
 
-const HELP = `Synergon — terminal-native agentic coding CLI
+const HELP = `Telos — terminal-native agentic coding CLI
 
 USAGE
-  synergon [command] [options]
+  telos [command] [options]
 
 COMMANDS
   chat              Start an interactive session (default)
@@ -47,10 +47,10 @@ COMMANDS
   version           Print version
 
 OPTIONS
-  --model <name>        Model name override (also SYNERGON_MODEL)
-  --provider <name>     Provider override (also SYNERGON_PROVIDER)
-  --base-url <url>      API base URL override (also SYNERGON_BASE_URL)
-  --max-tokens <n>      Hard token budget override (also SYNERGON_MAX_TOKENS)
+  --model <name>        Model name override (also TELOS_MODEL)
+  --provider <name>     Provider override (also TELOS_PROVIDER)
+  --base-url <url>      API base URL override (also TELOS_BASE_URL)
+  --max-tokens <n>      Hard token budget override (also TELOS_MAX_TOKENS)
   --max-tool-calls <n>  Hard tool-call budget override
 
 BYOK
@@ -71,9 +71,9 @@ function cmdStatus(): void {
   const hasKey = Boolean(process.env[keyEnv]);
   const lines = [
     `project      ${root}`,
-    `state        ${hasState ? `${STATE_DIRNAME}/config.toml` : "not initialized (run: synergon init)"}`,
+    `state        ${hasState ? `${STATE_DIRNAME}/config.toml` : "not initialized (run: telos init)"}`,
     `provider     ${cfg.model.provider}`,
-    `model        ${cfg.model.name || "(unset — set SYNERGON_MODEL)"}`,
+    `model        ${cfg.model.name || "(unset — set TELOS_MODEL)"}`,
     `credentials  env:${keyEnv} ${hasKey ? "present" : "MISSING"}`,
     `autonomy     ${cfg.runtime.autonomy}`,
     `budgets      tokens=${cfg.runtime.maxTotalTokens} toolCalls=${cfg.runtime.maxToolCalls} workers=${cfg.runtime.maxWorkerSpawns} parallel=${cfg.runtime.maxParallelWorkers} wallTime=${cfg.runtime.maxWallTimeSeconds}s`,
@@ -95,13 +95,13 @@ async function main(): Promise<number> {
   const { command, args, flags } = parseArgs(process.argv.slice(2));
 
   const applyFlagOverrides = (): void => {
-    if (typeof flags.get("model") === "string") process.env["SYNERGON_MODEL"] = flags.get("model") as string;
-    if (typeof flags.get("provider") === "string") process.env["SYNERGON_PROVIDER"] = flags.get("provider") as string;
-    if (typeof flags.get("base-url") === "string") process.env["SYNERGON_BASE_URL"] = flags.get("base-url") as string;
+    if (typeof flags.get("model") === "string") process.env["TELOS_MODEL"] = flags.get("model") as string;
+    if (typeof flags.get("provider") === "string") process.env["TELOS_PROVIDER"] = flags.get("provider") as string;
+    if (typeof flags.get("base-url") === "string") process.env["TELOS_BASE_URL"] = flags.get("base-url") as string;
     const mt = Number(flags.get("max-tokens"));
-    if (Number.isInteger(mt) && mt > 0) process.env["SYNERGON_MAX_TOKENS"] = String(mt);
+    if (Number.isInteger(mt) && mt > 0) process.env["TELOS_MAX_TOKENS"] = String(mt);
     const mtc = Number(flags.get("max-tool-calls"));
-    if (Number.isInteger(mtc) && mtc > 0) process.env["SYNERGON_MAX_TOOL_CALLS"] = String(mtc);
+    if (Number.isInteger(mtc) && mtc > 0) process.env["TELOS_MAX_TOOL_CALLS"] = String(mtc);
   };
 
   try {
@@ -113,7 +113,7 @@ async function main(): Promise<number> {
         return 0;
       case "version":
       case "--version":
-        console.log("synergon 0.1.0");
+        console.log("telos 0.1.0");
         return 0;
       case "init":
         cmdInit();
@@ -126,7 +126,7 @@ async function main(): Promise<number> {
         applyFlagOverrides();
         const cfg = loadConfig(process.cwd());
         if (!cfg.model.name) {
-          console.error("No model configured. Set SYNERGON_MODEL or [model] name in .project-agent/config.toml.");
+          console.error("No model configured. Set TELOS_MODEL or [model] name in .project-agent/config.toml.");
           return 2;
         }
         const { runSession } = await import("./session/session.ts");

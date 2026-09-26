@@ -11,7 +11,7 @@ import { truncateOutput } from "./util.ts";
  * every other tool output.
  */
 
-const UA = "Mozilla/5.0 (X11; Linux x86_64) Synergon/0.1 (terminal agent)";
+const UA = "Mozilla/5.0 (X11; Linux x86_64) Telos/0.1 (terminal agent)";
 
 export interface WebSearchHit {
   title: string;

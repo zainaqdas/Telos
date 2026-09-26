@@ -234,7 +234,7 @@ function stringifyArg(v: unknown, type: ExternalToolParam["type"]): string {
 /** Spawn through /bin/sh with the same discipline as run_shell. */
 function runCommand(toolName: string, command: string, ctx: ToolExecContext): Promise<ToolResult> {
   return new Promise((resolve) => {
-    const env: Record<string, string | undefined> = { ...process.env, SYNERGON: "1" };
+    const env: Record<string, string | undefined> = { ...process.env, TELOS: "1" };
     for (const k of Object.keys(env)) {
       if (k.startsWith("NODE_TEST_")) delete env[k];
     }

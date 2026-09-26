@@ -16,7 +16,7 @@ import { reduce } from "../src/events/state.ts";
 import { FailureLearner } from "../src/memory/pipeline.ts";
 import { Orchestrator } from "../src/workers/orchestrator.ts";
 import { parseWorkerReport, ROLES } from "../src/workers/roles.ts";
-import type { SynergonConfig } from "../src/config/schema.ts";
+import type { TelosConfig } from "../src/config/schema.ts";
 
 /** Provider that emits the scripted turn for a marker, then converges to prose. */
 class RoleRoutingProvider implements Provider {
@@ -40,7 +40,7 @@ class RoleRoutingProvider implements Provider {
   }
 }
 
-function fakeConfig(): SynergonConfig {
+function fakeConfig(): TelosConfig {
   return {
     model: { provider: "openai", name: "fake-1", baseUrl: "", apiKeyEnv: "NOOP", temperature: 0, maxTokens: 1024 },
     runtime: {

@@ -18,7 +18,7 @@ import { FailureLearner } from "../src/memory/pipeline.ts";
 import { Orchestrator } from "../src/workers/orchestrator.ts";
 import { evaluateObjection, formatReportForManager, parseWorkerReport } from "../src/workers/roles.ts";
 import { CompletionGate } from "../src/gate/gate.ts";
-import type { SynergonConfig } from "../src/config/schema.ts";
+import type { TelosConfig } from "../src/config/schema.ts";
 
 /** Scripted provider: each stream call consumes the next turn and records the prompts it saw. */
 class ScriptedProvider implements Provider {
@@ -44,7 +44,7 @@ class ScriptedProvider implements Provider {
   }
 }
 
-function fakeConfig(): SynergonConfig {
+function fakeConfig(): TelosConfig {
   return {
     model: { provider: "openai", name: "fake-1", baseUrl: "", apiKeyEnv: "NOOP", temperature: 0, maxTokens: 1024 },
     runtime: {

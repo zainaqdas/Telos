@@ -1,4 +1,4 @@
-# Synergon
+# Telos
 
 Terminal-native agentic coding CLI. A persistent Manager plans, edits, runs, and verifies work directly in your repository — with hard runtime budgets, a single evidence-based Completion Gate, and failure-aware repetition protection.
 
@@ -6,7 +6,7 @@ Terminal-native agentic coding CLI. A persistent Manager plans, edits, runs, and
 
 ## Why
 
-Synergon is built on one principle: **the runtime enforces invariants; the model only provides judgment.** The model cannot exceed your budget, cannot talk its way past the Completion Gate, and cannot silently repeat a failing command. Convincing reasoning is never confused with verified work.
+Telos is built on one principle: **the runtime enforces invariants; the model only provides judgment.** The model cannot exceed your budget, cannot talk its way past the Completion Gate, and cannot silently repeat a failing command. Convincing reasoning is never confused with verified work.
 
 ## Quick start
 
@@ -14,13 +14,13 @@ Requires Node.js 22+.
 
 ```bash
 # in your project root
-npx synergon init          # writes .project-agent/config.toml
+npx telos init          # writes .project-agent/config.toml
 export OPENAI_API_KEY=…    # BYOK: your key, your environment
-export SYNERGON_MODEL=gpt-5-mini
-npx synergon chat
+export TELOS_MODEL=gpt-5-mini
+npx telos chat
 ```
 
-Works with any OpenAI-compatible endpoint (`SYNERGON_BASE_URL`), including OpenRouter, Ollama, and vLLM.
+Works with any OpenAI-compatible endpoint (`TELOS_BASE_URL`), including OpenRouter, Ollama, and vLLM.
 
 ## Architecture
 
@@ -69,7 +69,7 @@ The Manager is the primary builder: it plans, edits, runs, and verifies. Workers
 ```toml
 [model]
 provider = "openai"            # openai | anthropic | openai-compatible | openrouter | ollama
-name = ""                      # or SYNERGON_MODEL
+name = ""                      # or TELOS_MODEL
 api_key_env = "OPENAI_API_KEY" # BYOK: env var holding your key
 worker_model = ""              # optional cheaper model for worker delegations
 

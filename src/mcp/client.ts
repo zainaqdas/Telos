@@ -83,7 +83,7 @@ export class McpClient {
     const result = (await this.request("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
-      clientInfo: { name: "synergon", version: "0.1.0" },
+      clientInfo: { name: "telos", version: "0.1.0" },
     })) as { serverInfo?: { name?: string } };
     this.notify("notifications/initialized");
     this.initialized = true;

@@ -14,7 +14,7 @@ import { EventLog } from "../src/events/log.ts";
 import { reduce } from "../src/events/state.ts";
 import { CompletionGate } from "../src/gate/gate.ts";
 import { ManagerLoop } from "../src/manager/loop.ts";
-import type { SynergonConfig } from "../src/config/schema.ts";
+import type { TelosConfig } from "../src/config/schema.ts";
 
 /** Scripted provider: replays a fixed sequence of turns. */
 class FakeProvider implements Provider {
@@ -34,7 +34,7 @@ class FakeProvider implements Provider {
   }
 }
 
-function fakeConfig(): SynergonConfig {
+function fakeConfig(): TelosConfig {
   return {
     model: { provider: "openai", name: "fake-1", baseUrl: "", apiKeyEnv: "NOOP", temperature: 0, maxTokens: 1024 },
     runtime: {

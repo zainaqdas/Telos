@@ -1,4 +1,4 @@
-# Synergon Memory — Stores, Trust, and Lesson Promotion
+# Telos Memory — Stores, Trust, and Lesson Promotion
 
 Memory is **plain JSONL on disk** under `.project-agent/memory/`. No vector database, no embeddings, no daemon. The model never writes memory directly — records enter through runtime pipelines (user corrections, executed tool results) so that hallucination cannot become durable knowledge.
 
@@ -85,4 +85,4 @@ An exit-0 test run that reports **fewer than `runtime.min_test_count` tests** (d
 
 - Not a second event log — `.project-agent/events/` remains the sole authority for task state
 - Not model-writable — no code path lets the model add records directly
-- Not global by default — stores live per-project; `~/.synergon/` is reserved for future global skills/config
+- Not global by default — stores live per-project; `~/.telos/` is reserved for future global skills/config
