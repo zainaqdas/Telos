@@ -39,7 +39,7 @@ function fakeConfig(): SynergonConfig {
     model: { provider: "openai", name: "fake-1", baseUrl: "", apiKeyEnv: "NOOP", temperature: 0, maxTokens: 1024 },
     runtime: {
       autonomy: "balanced", maxTotalTokens: 100_000, maxToolCalls: 10, maxWorkerSpawns: 0,
-      maxParallelWorkers: 0, maxWallTimeSeconds: 60, shellTimeoutSeconds: 15, maxStreamAttempts: 2, minTestCount: 1, streamTimeoutSeconds: 0,
+      maxParallelWorkers: 0, maxWallTimeSeconds: 60, shellTimeoutSeconds: 15, maxStreamAttempts: 2, minTestCount: 1, streamTimeoutSeconds: 0, compactionThresholdTokens: 0,
     },
     security: { confirmDestructive: true, blockSecrets: true },
   };

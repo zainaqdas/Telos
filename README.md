@@ -98,9 +98,19 @@ API keys are read from the environment only — never written to prompts, logs, 
 
 ```bash
 npm install
-npm test        # node:test suite, includes process-tree and end-to-end tests
+npm test             # node:test suite, includes process-tree and end-to-end tests
+npm run eval:scenarios  # spec-mandated scenario evals (repetition, gate, budgets, cancellation, correction)
 npm run typecheck
 ```
+
+### Slash commands
+
+`/help /status /profile /skills /memory /collab /diff /undo /retry /compact /new /clear /provider /models /model /waive /cancel /correct /exit`
+
+Notable: `/undo` restores the pre-edit content of the last workspace write; `/compact` folds older transcript
+into a digest derived from the event log (corrections, blockers, requirements, and recent failures survive);
+`/new` starts a fresh task (transcript, journal, gate state cleared — durable memory persists); `/cancel`
+works even while a task is running.
 
 Zero runtime dependencies; TypeScript runs natively via Node type-stripping.
 

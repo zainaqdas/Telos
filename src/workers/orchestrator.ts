@@ -613,6 +613,16 @@ export class Orchestrator {
   private failed(message: string): DelegationResult {
     return { workerId: "none", role: "explorer", report: emptyReport(message), tokens: 0, toolCalls: 0, error: message };
   }
+
+  /** /new (Part 61): rebind to the fresh task's event log (sessions are task-scoped and empty across tasks). */
+  attachEvents(events: EventLog): void {
+    (this.deps as { events: EventLog }).events = events;
+    this.sessions.clear();
+    this.proposalSeq = 0;
+    this.blockerSeq = 0;
+    this.objectionSeq = 0;
+    this.decisionSeq = 0;
+  }
 }
 
 const STOP_TOKENS = new Set([

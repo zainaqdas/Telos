@@ -98,6 +98,11 @@ export class BudgetEnforcer {
     this.state.runningWorkers = Math.max(0, this.state.runningWorkers - 1);
   }
 
+  /** /new (Part 61): usage counters start over for the fresh task. */
+  resetUsage(): void {
+    this.state = { tokens: 0, toolCalls: 0, modelCalls: 0, workersSpawned: 0, runningWorkers: 0, startedAt: this.nowFn() };
+  }
+
   /** First budget violation wins; used to emit budget_exceeded once. */
   firstViolation(now = Date.now): BudgetVerdict {
     return this.check("model_call", 0, now);

@@ -79,6 +79,8 @@ export interface RuntimeConfig {
   minTestCount: number;
   /** Seconds of stream inactivity before a model call is aborted (0 disables). */
   streamTimeoutSeconds: number;
+  /** Estimated-token threshold that triggers transcript compaction (0 disables). */
+  compactionThresholdTokens: number;
 }
 
 export interface SecurityConfig {
@@ -119,6 +121,7 @@ export function parseConfig(root: Record<string, unknown>): SynergonConfig {
       maxStreamAttempts: expectInt(runtime["max_stream_attempts"], "runtime.max_stream_attempts", { min: 1, max: 5, fallback: 2 }),
       minTestCount: expectInt(runtime["min_test_count"], "runtime.min_test_count", { min: 0, fallback: 1 }),
       streamTimeoutSeconds: expectInt(runtime["stream_timeout_seconds"], "runtime.stream_timeout_seconds", { min: 0, fallback: 120 }),
+      compactionThresholdTokens: expectInt(runtime["compaction_threshold_tokens"], "runtime.compaction_threshold_tokens", { min: 0, fallback: 60_000 }),
     },
     security: {
       confirmDestructive: expectBool(security["confirm_destructive"], "security.confirm_destructive", true),

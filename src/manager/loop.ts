@@ -4,6 +4,7 @@ import type { ToolRegistry, ToolExecContext } from "../tools/registry.ts";
 import { validateToolArgs } from "../tools/registry.ts";
 import type { BudgetEnforcer } from "../runtime/usage.ts";
 import { RepetitionGuard, fingerprintCall, guardKey, classifyShellFailure, DEFAULT_GUARD_CONFIG } from "../runtime/repetition.ts";
+import { compactMessages } from "../runtime/compact.ts";
 import type { CancellationController } from "../runtime/cancellation.ts";
 import type { EventLog } from "../events/log.ts";
 import { reduce } from "../events/state.ts";
@@ -38,6 +39,11 @@ export interface ManagerDeps {
   workerPromptOverride?: { text: string; isWorker: true };
   /** Live UI hook for runtime notices (memory injection, lessons). */
   onNotice?: (text: string) => void;
+  /**
+   * Compaction config (Part 68): token threshold; 0 disables compaction.
+   * The digest is built from the event log — the authoritative record.
+   */
+  compaction?: { thresholdTokens: number; eventSource: () => import("../events/types.ts").AgentEvent[] };
 }
 
 export interface RunOptions {
@@ -65,7 +71,7 @@ interface PendingToolCall {
 
 export class ManagerLoop {
   private readonly messages: Message[] = [];
-  private readonly guard: RepetitionGuard;
+  private guard: RepetitionGuard;
   private readonly deps: ManagerDeps;
   private usage: Usage = emptyUsage();
   private busy = false;
@@ -91,6 +97,30 @@ export class ManagerLoop {
   /** Request cooperative cancellation of the current run. */
   requestCancel(): void {
     this.deps.cancellation.cancel("user requested cancellation");
+  }
+
+  /** /new (Part 61): fresh task — transcript, guard, and usage start over. */
+  reset(): void {
+    this.messages.length = 0;
+    this.messages.push({
+      role: "system",
+      parts: [{ type: "text", text: this.deps.workerPromptOverride ? this.deps.workerPromptOverride.text : buildSystemPrompt(this.deps.config, this.deps.repoProfile) }],
+    });
+    this.guard = this.deps.guard ?? new RepetitionGuard(DEFAULT_GUARD_CONFIG);
+    this.usage = emptyUsage();
+    this.streamRetries = 0;
+    this.rejectionHits.clear();
+  }
+
+  /** /new: rebind to the fresh task's event log. */
+  attachEvents(events: EventLog): void {
+    (this.deps as { events: EventLog }).events = events;
+  }
+
+  /** /compact (Part 68): fold older transcript into the digest on demand. */
+  compactNow(): { compacted: boolean; removed: number; savedTokens: number } {
+    const src = this.deps.compaction?.eventSource ?? (() => []);
+    return compactMessages(this.messages, src(), { force: true });
   }
 
   /** Run the loop for one user instruction until the Gate rules or limits hit. */
@@ -152,6 +182,18 @@ export class ManagerLoop {
     while (true) {
       if (this.deps.cancellation.isCancelled) return this.finish("cancelled", assistantText);
 
+      // ── Context compaction (Part 68): runtime policy, applied before each
+      // model turn. Never runs in worker loops — their context is scoped and
+      // short-lived by construction.
+      if (!this.isWorker && this.deps.compaction && this.deps.compaction.thresholdTokens > 0) {
+        try {
+          const r = compactMessages(this.messages, this.deps.compaction.eventSource(), { thresholdTokens: this.deps.compaction.thresholdTokens });
+          if (r.compacted) this.deps.events.append("task_updated", { notice: `context compacted: ${r.removed} older messages folded into digest (-${r.savedTokens} est. tokens)` });
+        } catch {
+          /* compaction must never break the run */
+        }
+      }
+
       // ── Hard budget gate: the runtime decides, not the model (Part 23) ──
       const modelVerdict = this.deps.budget.check("model_call");
       if (!modelVerdict.allowed) {
@@ -172,6 +214,10 @@ export class ManagerLoop {
         for await (const chunk of stream) {
           if (chunk.type === "text_delta" && chunk.text) {
             text += chunk.text;
+            // Preserve partial output: a cancellation or provider failure
+            // mid-stream must not discard what was already said (Part 78:
+            // stop means stop, but state is preserved).
+            assistantText = text;
             opts.onText?.(chunk.text);
           } else if (chunk.type === "tool_call_delta" && chunk.toolCall) toolCalls.push(chunk.toolCall);
           else if (chunk.type === "usage" && chunk.usage) turnUsage = chunk.usage;
@@ -200,6 +246,14 @@ export class ManagerLoop {
       if (turnUsage) {
         this.deps.budget.recordUsage(turnUsage);
         this.usage = addUsage(this.usage, turnUsage);
+        // Mid-turn overshoot (Part 23): usage arrives with the finished
+        // response — it can push the task over budget mid-run. Stop before
+        // any further spend; never silently exceed the configured budget.
+        const afterUsage = this.deps.budget.firstViolation();
+        if (!afterUsage.allowed) {
+          this.deps.events.append("budget_exceeded", { resource: afterUsage.resource, message: afterUsage.message });
+          return { ...this.finish("budget_exceeded", assistantText), detail: afterUsage.message };
+        }
       }
       if (text) assistantText = text;
       void stopReason;

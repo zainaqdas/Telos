@@ -66,6 +66,14 @@ function apply(state: TeamState, ev: AgentEvent): void {
       break;
     case "user_correction":
       state.instructions.push({ text: str(d["text"]), t: ev.t, isCorrection: true });
+      // A correction after a terminal status reopens the task (Part 15): the
+      // user is boss — new instructions supersede even a completed task, and
+      // the work that follows must be judged by the gate again.
+      if (state.taskStatus !== "active") {
+        state.taskStatus = "active";
+        state.task.status = "active";
+        state.task.endReason = undefined;
+      }
       // A correction may conflict with any prior work (Part 15): pending,
       // in-progress, AND satisfied requirements are invalidated so stale work
       // can never silently survive. Blocked/failed/waived keep their status.

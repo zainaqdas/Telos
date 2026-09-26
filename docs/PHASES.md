@@ -1,5 +1,28 @@
 # Synergon — Phase Reports
 
+## Phase 9.5 — Spec Part 61 commands + mandatory scenario evals (Parts 72–79)
+
+**Implemented**
+
+- **Slash commands completed** (Part 61): `/undo` (edit journal — pre-edit content captured before every successful `write_file`/`edit_file`; restore or remove-on-created; depth-capped at 50), `/retry` (re-runs the previous instruction), `/compact` + automatic threshold-based compaction (`runtime.compaction_threshold_tokens`, default 60k, 0 disables), `/new`/`/clear` (fresh task: new event log, gate, budget usage, transcript, journal — durable memory persists), `/provider` (provider catalog with key presence per BYOK env var), `/models` (live capability discovery + curated model list). A typed `/cancel` now acts **immediately** mid-run instead of queueing behind the run it was cancelling — a real UX bug the cancellation scenario's design review surfaced before any eval ran.
+- **Context compaction (Part 68)**: runtime-owned, reducer-informed. The digest is built from the event log (the authoritative record), never from the model's own summary of itself. Preserved by construction: system prompt, unresolved corrections, open blockers, undecided objections, active requirements/skills, active decisions, recent failures, guard blocks. Injected as a system notice — no fake dialogue. The ManagerLoop consults compaction before every model turn (worker loops never compact); `/compact` forces it on demand.
+- **Scenario evals** (`evals/scenarios/scenario.ts`, `npm run eval:scenarios`): the spec's mandatory scenarios run the real loop, real tools, real guard, and real event log against a scripted provider, asserting on emitted events and gate verdicts: P76 repetition (identical failing call executed exactly twice, third refused pre-execution as `REPEATED_FAILURE`, changed-state retry allowed), P77 completion gate (fail→INCOMPLETE, verified fix→COMPLETE, unverified write→INCOMPLETE), P78 budgets (tool-call: stop + `budget_exceeded` recorded once + zero hidden calls; token: mid-turn usage overshoot stops the run), P79 cancellation (cancelled run preserves partial output, records no completion), P74 correction (correction event, requirement invalidation, stale evidence marked invalid).
+
+**Two real runtime gaps the scenarios exposed** (both fixed):
+
+- *Mid-turn token overshoot*: provider-reported usage arrives with the finished response and could push the task over budget with no check until the next turn's start — one more model call could silently run on an exhausted budget. The loop now re-checks `firstViolation()` immediately after recording usage.
+- *Corrections could not reopen a terminal task*: the reducer left `taskStatus` at `completed`/`cancelled` after a `user_correction`, so post-correction work was judged against a closed task. A correction now reopens the task — the user is boss, and follow-up work faces the gate again.
+
+Also fixed: partially streamed assistant text was discarded on mid-stream cancellation/provider failure; `assistantText` now tracks the stream as it arrives (Part 78: stop means stop, state is preserved).
+
+**Tested** — 7 new unit tests (journal capture/restore/created-file removal/cap, digest protection of corrections/blockers/requirements/failures, compaction shape + threshold/force semantics, budget `resetUsage`). `npx tsc --noEmit` clean; **121/121 unit tests**; **6/6 scenario evals**.
+
+**Failed / learned** — the first token-budget scenario exposed the overshoot gap only because it asserted on events rather than internals; the correction scenario failed until the reducer learned to reopen terminal tasks; two scenario drafts had assertion-math bugs (transcript under the threshold it claimed to exceed; a "build" classified as a lint by the head-matcher) — the eval harness is only honest when its own fixtures are.
+
+**Remaining** — spec Phase 8 (web + browser + vision), spec Phase 9 (multi-provider + cost reporting), MCP (spec Phase 10), optimization phase (Part 96: gate re-reduction caching, retrieval tuning). `/models` currently reports curated lists, not live endpoint discovery.
+
+**Architecture changes** — compaction is runtime policy informed by the reducer, not model judgment; the edit journal introduces the first user-level inverse operation; scenario evals now exist as a committed, repeatable gate for the spec's mandatory behaviors alongside the unit suite and the live collaboration harness.
+
 ## Phase 9 — Tool policy completion (+ live harness verification)
 
 **Implemented**

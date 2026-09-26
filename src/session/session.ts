@@ -22,6 +22,9 @@ import { MemoryStore } from "../memory/store.ts";
 import { FailureLearner } from "../memory/pipeline.ts";
 import { Orchestrator } from "../workers/orchestrator.ts";
 import { loadExternalToolSpecs, registerExternalTools } from "../tools/external.ts";
+import { providerCatalog } from "../providers/index.ts";
+import { EditJournal, journalWriteTools, undoLastEdit } from "./journal.ts";
+
 
 /**
  * Interactive session (Part 60/62): terminal-native, minimal, no web UI.
@@ -32,6 +35,16 @@ import { loadExternalToolSpecs, registerExternalTools } from "../tools/external.
 interface SessionOpts {
   projectRoot: string;
   resume?: boolean;
+}
+
+/** /new (Part 61): rebind every event-log consumer to the fresh task log. */
+function swapEventLog(
+  fresh: EventLog,
+  consumers: { manager: ManagerLoop; orchestrator: Orchestrator; budget: BudgetEnforcer },
+): void {
+  consumers.manager.attachEvents(fresh);
+  consumers.orchestrator.attachEvents(fresh);
+  consumers.budget.resetUsage();
 }
 
 export async function runSession(opts: SessionOpts): Promise<number> {
@@ -53,8 +66,8 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   const cancellation = new CancellationController();
   registerShellTools(registry, { cancellation });
 
-  const taskId = `t-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
-  const events = new EventLog(join(stateDir, "events"), taskId);
+  let taskId = `t-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
+  let events = new EventLog(join(stateDir, "events"), taskId);
   const limits: BudgetLimits = {
     maxTotalTokens: config.runtime.maxTotalTokens,
     maxToolCalls: config.runtime.maxToolCalls,
@@ -81,7 +94,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     repoProfile = undefined; // profiling must never block a session
   }
 
-  const gate = new CompletionGate(() => events.readAll());
+  let gate = new CompletionGate(() => events.readAll());
   const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds });
 
   // Skill Engine (Phase 3): load + route deterministically; activation and
@@ -117,6 +130,12 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   for (const name of external.registered) out(`  ⚙ external tool registered: ${name}`);
   for (const s of external.skipped) out(`  ⚙ external tool skipped: ${s.reason}`);
 
+  // Edit journal (Part 61): /undo restores the pre-edit content of the most
+  // recent successful workspace write. Cleared on /new — a fresh task must
+  // never undo edits belonging to the previous task.
+  const journal = new EditJournal();
+  journalWriteTools(registry, journal);
+
   const manager = new ManagerLoop({
     provider,
     model: config.model.name,
@@ -130,6 +149,8 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     skillRouter,
     learner,
     repoProfile,
+    /** Compaction (Part 68): reducer-informed, threshold-gated (0 disables). */
+    compaction: { thresholdTokens: config.runtime.compactionThresholdTokens ?? 60_000, eventSource: () => events.readAll() },
     onNotice: (text) => {
       if (text.startsWith("Runtime lesson")) out(`  ℹ ${text.slice(0, 140)}`);
       else if (text.startsWith("PROJECT MEMORY") && process.env["SYNERGON_DEBUG_MEMORY"] === "1") {
@@ -226,6 +247,13 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     // when the run finishes — never concurrently (Part 15 corrections arrive
     // this way during long runs).
     if (manager.isBusy()) {
+      // Typed cancellation must act immediately, not queue behind the run it
+      // cancels (Part 62: the user remains boss).
+      if (trimmed === "/cancel") {
+        manager.requestCancel();
+        out("\n[cancel requested]");
+        return;
+      }
       pendingLines.push(trimmed);
       return;
     }
@@ -279,7 +307,40 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         await runInstruction(text, true);
         return;
       }
-      const handled = await handleSlashCommand(trimmed, { config, budget, events, manager, shutdown, projectRoot: opts.projectRoot, learnerStore: learner.store, orchestrator });
+      const handled = await handleSlashCommand(trimmed, {
+        config,
+        budget,
+        events,
+        manager,
+        shutdown,
+        projectRoot: opts.projectRoot,
+        learnerStore: learner.store,
+        orchestrator,
+        journal,
+        lastInstruction,
+        runInstruction,
+        providerCapabilities: () => provider.capabilities(config.model.name),
+        compactNow: () => manager.compactNow(),
+        resetTask: (newTaskId: string) => {
+          // Fresh task identity: new EventLog + reset budget, gate and
+          // orchestrator rebind to it (worker sessions are task-scoped and
+          // empty here — /new is refused while anything is running).
+          taskId = newTaskId;
+          const fresh = new EventLog(join(stateDir, "events"), taskId);
+          fresh.append("task_started", { title: "interactive session", limits: {
+            max_total_tokens: limits.maxTotalTokens,
+            max_tool_calls: limits.maxToolCalls,
+            max_worker_spawns: limits.maxWorkerSpawns,
+            max_parallel_workers: limits.maxParallelWorkers,
+            max_wall_time_seconds: limits.maxWallTimeSeconds,
+          } });
+          events = fresh;
+          gate = new CompletionGate(() => events.readAll());
+          manager.attachEvents(fresh);
+          orchestrator.attachEvents(fresh);
+          budget.resetUsage();
+        },
+      });
       prompt();
       if (handled === "exit") shutdown(0);
       return;
@@ -287,9 +348,12 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     await runInstruction(trimmed, isCorrection);
   };
 
+  let lastInstruction = ""; // for /retry (Part 61)
+
   const runInstruction = async (text: string, isCorrection: boolean): Promise<void> => {
     rendering = true;
     const started = Date.now();
+    lastInstruction = text;
     try {
       const result = await manager.run(text, { isCorrection, onText: (delta) => printer.push(delta),
         onTool: (name, summary) => {
@@ -327,6 +391,12 @@ async function handleSlashCommand(
     projectRoot: string;
     learnerStore: MemoryStore;
     orchestrator: Orchestrator;
+    journal: EditJournal;
+    lastInstruction: string;
+    runInstruction: (text: string, isCorrection: boolean) => Promise<void>;
+    providerCapabilities: () => import("../providers/types.ts").Capabilities;
+    compactNow: () => { compacted: boolean; removed: number; savedTokens: number };
+    resetTask: (taskId: string) => void;
   },
 ): Promise<"exit" | undefined> {
   const [cmd, ...args] = line.slice(1).split(/\s+/);
@@ -376,7 +446,13 @@ async function handleSlashCommand(
         "/memory          show durable memory (rules, lessons, rejected approaches)",
         "/collab          open proposals, blockers, and unresolved objections",
         "/waive <id> [for <Nh|Nd>] [reason]   waive an open blocker (user-only; optional expiry, then it is open again)",
-        "/cancel          cancel the running task",
+        "/undo            restore the pre-edit content of the last workspace write",
+        "/retry           re-run the previous instruction",
+        "/compact         fold older transcript into a digest (corrections/blockers/requirements survive)",
+        "/new, /clear     fresh task: clears transcript, journal, gate state (memory persists)",
+        "/provider        list providers, key presence, and the active one",
+        "/models          capabilities of the active model + known models for the provider",
+        "/cancel          cancel the running task (works mid-run)",
         "/correct <text>  send a correction (highest priority, invalidates conflicting work)",
         "/model           show configured model (change via config/env)",
         "/exit            quit Synergon",
@@ -447,6 +523,62 @@ async function handleSlashCommand(
       const event = { id: blocker.id, reason: reasonParts.join(" ") || "user waived via /waive" };
       deps.events.append("blocker_waived", ttlHours !== undefined ? { ...event, expires_at: Date.now() + ttlHours * 3_600_000 } : event);
       out(`[blocker ${blocker.id} waived${ttlHours !== undefined ? ` for ${ttlHours}h — the gate treats it as open again after that` : " — stays visible as waived; gate no longer blocked by it"}]`);
+      return;
+    }
+    case "undo": {
+      if (deps.manager.isBusy()) {
+        out("(cannot undo while a task is running)");
+        return;
+      }
+      const done = await undoLastEdit(deps.journal, deps.projectRoot);
+      out(done ? `[undone: ${done}]` : `(nothing to undo — journal is empty)`);
+      return;
+    }
+    case "retry": {
+      if (deps.manager.isBusy()) {
+        out("(a task is already running)");
+        return;
+      }
+      if (!deps.lastInstruction) {
+        out("(no previous instruction to retry)");
+        return;
+      }
+      out(`[retrying: ${deps.lastInstruction.slice(0, 80)}]`);
+      await deps.runInstruction(deps.lastInstruction, false);
+      return;
+    }
+    case "new":
+    case "clear": {
+      if (deps.manager.isBusy()) {
+        out("(cancel the running task first)");
+        return;
+      }
+      deps.journal.clear();
+      deps.manager.reset();
+      const taskId = `t-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
+      deps.resetTask(taskId);
+      out(`[fresh task ${taskId} — transcript, journal, and gate state cleared; memory persists]`);
+      return;
+    }
+    case "provider": {
+      for (const p of providerCatalog()) {
+        const keyEnv = p.id === deps.config.model.provider ? deps.config.model.apiKeyEnv : p.defaultKeyEnv;
+        const hasKey = Boolean(process.env[keyEnv]);
+        out(`${p.status === "available" ? "✓" : "…"} ${p.id}  [${keyEnv}: ${hasKey ? "present" : "missing"}]${p.id === deps.config.model.provider ? "  ← active" : ""}\n    ${p.note ?? ""}`);
+      }
+      return;
+    }
+    case "models": {
+      const caps = deps.providerCapabilities();
+      out(`active provider ${deps.config.model.provider} — capabilities of ${deps.config.model.name || "(unset)"}:`);
+      out(`  tools=${caps.supportsTools ? "yes" : "no"}  vision=${caps.supportsVision ? "yes" : "no"}  streaming=${caps.supportsStreaming ? "yes" : "no"}  structured=${caps.supportsStructuredOutput ? "yes" : "no"}  context=${caps.contextLimit}`);
+      const models = providerCatalog().find((p) => p.id === deps.config.model.provider)?.models ?? [];
+      out(models.length ? `known models: ${models.join(", ")}` : "known models: (openai-compatible endpoint — set model.name manually)");
+      return;
+    }
+    case "compact": {
+      const r = deps.compactNow();
+      out(r.compacted ? `[compacted: ${r.removed} older messages folded into the digest, ~${r.savedTokens} tokens saved]` : `(transcript under threshold — nothing to compact)`);
       return;
     }
     case "cancel":
