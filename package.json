@@ -1,9 +1,12 @@
 {
-  "name": "telos",
+  "name": "@zainaqdas/telos",
   "version": "0.1.0",
-  "description": "Terminal-native agentic coding CLI: persistent manager, evidence-based completion gate, hard runtime budgets.",
+  "description": "Terminal-native agentic coding CLI: persistent manager, evidence-based completion gate, hard runtime budgets. Command: telos.",
   "type": "module",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/zainaqdas/Telos.git"
