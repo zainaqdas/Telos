@@ -87,6 +87,9 @@ fi
 if ! command -v npm >/dev/null 2>&1; then
   fail "npm not found (it ships with Node). Reinstall Node from https://nodejs.org."
 fi
+( cd "$INSTALL_DIR" && npm install --silent >/dev/null 2>&1 && npm run build --silent >/dev/null 2>&1 ) \
+  && say "✓ compiled dist/ (npm installs of your projects will use plain JS)" \
+  || say "  (build skipped — the clone will run src/ via Node's native type stripping)"
 ( cd "$INSTALL_DIR" && npm link --silent >/dev/null 2>&1 ) || fail "npm link failed — run 'cd $INSTALL_DIR && npm link' manually to see the error."
 say "✓ linked the telos command"
 

@@ -2,13 +2,16 @@
 /**
  * telos launcher.
  *
- * npm install (or npm link) makes `telos` this file. Type stripping is a
- * Node 24+ feature (stable in 23.9+/22.18+ under its previous flag name),
- * so the wrapper re-execs with the right flag when the runtime needs it
- * instead of failing with a SyntaxError on .ts imports.
+ * - npm install (global or npx): runs the compiled dist/ JavaScript. Node
+ *   refuses to strip types from files under node_modules by design
+ *   (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), so the npm package must
+ *   ship plain JS — that is what dist/ is for.
+ * - git-clone install (install.sh): runs src/index.ts via Node's native
+ *   type stripping (Node 22.18+/24); install.sh builds dist/ as well when a
+ *   TypeScript compiler is available, and the launcher prefers it.
  *
- * A sibling local checkout (bin/../src) wins if present — the git-clone
- * install path uses that without going through node_modules.
+ * Node < 22.18 lacks native type stripping entirely: the launcher re-execs
+ * with --experimental-strip-types as a fallback.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -16,23 +19,32 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const entryTs = join(here, "..", "src", "index.ts");
+const distEntry = join(here, "..", "dist", "index.js");
+const srcEntry = join(here, "..", "src", "index.ts");
 
-// Source checkout (curl installer path): bin/../src/index.ts.
-// npm package path: the package ships src/, so the same relative path holds.
-const entry = existsSync(entryTs) ? entryTs : join(here, "..", "dist", "index.js");
-if (!existsSync(entry)) {
+let entry;
+let mode;
+if (existsSync(distEntry)) {
+  entry = distEntry;
+  mode = "js";
+} else if (existsSync(srcEntry)) {
+  entry = srcEntry;
+  mode = "ts";
+} else {
   console.error("telos: entry point not found — installation appears broken.");
   process.exit(1);
 }
 
-const [major] = process.versions.node.split(".").map(Number);
-const needsStrip = major < 24;
-const needsFlag = major < 23 || (major === 23 && process.versions.node.split(".")[1] < 9);
+if (mode === "js") {
+  const r = spawnSync(process.execPath, ["--no-warnings", entry, ...process.argv.slice(2)], { stdio: "inherit" });
+  process.exit(r.status ?? 1);
+}
 
-if (needsStrip) {
-  const flag = needsFlag ? "--experimental-strip-types" : "--experimental-strip-types";
-  const r = spawnSync(process.execPath, [flag, "--no-warnings", entry, ...process.argv.slice(2)], { stdio: "inherit" });
+// Source mode: Node >= 22.18 strips types natively; older runtimes need the
+// experimental flag re-exec.
+const [major, minor] = process.versions.node.split(".").map(Number);
+if (major < 22 || (major === 22 && minor < 18)) {
+  const r = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", entry, ...process.argv.slice(2)], { stdio: "inherit" });
   process.exit(r.status ?? 1);
 }
 const r = spawnSync(process.execPath, ["--no-warnings", entry, ...process.argv.slice(2)], { stdio: "inherit" });

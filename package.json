@@ -1,6 +1,6 @@
 {
   "name": "@zainaqdas/telos",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Terminal-native agentic coding CLI: persistent manager, evidence-based completion gate, hard runtime budgets. Command: telos.",
   "type": "module",
   "license": "MIT",
@@ -27,6 +27,7 @@
   },
   "files": [
     "bin/",
+    "dist/",
     "src/",
     "README.md"
   ],
@@ -36,11 +37,12 @@
   "scripts": {
     "start": "node src/index.ts",
     "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
     "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
     "eval:scenarios": "node --experimental-strip-types --no-warnings evals/scenarios/scenario.ts",
     "eval:acceptance": "node --experimental-strip-types --no-warnings evals/acceptance/acceptance.ts",
     "bench": "node --experimental-strip-types --no-warnings evals/bench.ts",
-    "prepublishOnly": "npm run typecheck && npm test",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "version": "node -p \"require('./package.json').version\""
   },
   "devDependencies": {
