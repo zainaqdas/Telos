@@ -30,6 +30,19 @@ export class CancellationController {
     this.children.clear();
   }
 
+  /**
+   * Start a fresh cancellation scope (Part 62: cancel stops the CURRENT task,
+   * not the rest of the session). The latch must never poison subsequent
+   * runs — a session where /cancel works once and every later instruction
+   * self-cancels is broken. The old signal stays aborted for anyone still
+   * holding it; new consumers get a live signal.
+   */
+  resetIfCancelled(): void {
+    if (!this.cancelled) return;
+    this.cancelled = false;
+    this.controller = new AbortController();
+  }
+
   /** Register a child process so a later cancel() takes it down too. */
   track(child: import("node:child_process").ChildProcess): void {
     if (this.cancelled) {

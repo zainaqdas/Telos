@@ -101,6 +101,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   let gate = new CompletionGate(() => events.readAll());
   const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds, signal: cancellation.signal });
+  // Mutable so a cancellation-scope reset can re-issue the live signal.
   /** Images attached this session (Part 51): sent only when the model supports vision. */
   const attachedImages: Array<{ mediaType: string; data: string; name: string }> = [];
 
@@ -364,6 +365,11 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     rendering = true;
     const started = Date.now();
     lastInstruction = text;
+    // A previous cancellation must not poison this run: cancel stops the
+    // CURRENT task, not the rest of the session (Part 62). The ctx signal is
+    // re-issued so network/shell tools track the live scope.
+    cancellation.resetIfCancelled();
+    ctx.signal = cancellation.signal;
     // Attached images (Part 51) ride with this instruction — only when the
     // active model actually supports vision (Part 51: never send otherwise).
     const images = attachedImages.splice(0, attachedImages.length);

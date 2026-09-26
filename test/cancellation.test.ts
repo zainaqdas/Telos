@@ -90,3 +90,28 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
     });
   });
 }
+
+test("resetIfCancelled re-arms the controller: cancel once, next scope is live again", async () => {
+  const ctrl = new CancellationController();
+  const firstSignal = ctrl.signal;
+  assert.equal(ctrl.isCancelled, false);
+
+  ctrl.cancel("first task");
+  assert.equal(ctrl.isCancelled, true);
+  assert.equal(firstSignal.aborted, true, "old signal stays aborted for existing holders");
+
+  ctrl.resetIfCancelled();
+  assert.equal(ctrl.isCancelled, false, "latch cleared");
+  assert.equal(ctrl.signal.aborted, false, "new signal is live");
+  assert.notEqual(ctrl.signal, firstSignal);
+
+  // A new cancel works and reaches the new signal.
+  ctrl.cancel("second task");
+  assert.equal(ctrl.isCancelled, true);
+  assert.equal(ctrl.signal.aborted, true);
+
+  // Idempotent no-op when not cancelled.
+  const ctrl2 = new CancellationController();
+  ctrl2.resetIfCancelled();
+  assert.equal(ctrl2.isCancelled, false);
+});
