@@ -1,5 +1,24 @@
 # Synergon — Phase Reports
 
+## Phase 10 (spec Phase 8) — Web + Browser + Vision
+
+**Implemented**
+
+- **`web_search`** (Part 48): keyless search via DuckDuckGo Lite with a deterministic parser built against the *live* endpoint's actual shape — single-quoted class attributes, `href` before `class`, redirect-wrapped URLs (`uddg=`) unwrapped, snippets in `<td class='result-snippet'>` siblings carrying both real tags and HTML-escaped markup. Returns title/URL/snippet triples; URLs travel with every claim (sources are kept).
+- **`read_url`** (Part 48): fetches with timeout + cancellation-signal support, strips scripts/styles/nav, decodes entities, caps output, and writes the full text to `.project-agent/cache/reads/` for later reference.
+- **Browser tools** (Parts 49–50): `browser_open` / `browser_click` / `browser_type` / `browser_screenshot` / `browser_console` drive the user's own Chromium-family browser over the Chrome DevTools Protocol using only Node built-ins (`spawn`, `fetch`, native `WebSocket`) — no Playwright/Puppeteer. Design decision and rationale in `docs/browser-design.md`: launch `--headless=new --remote-debugging-port=0`, read the DevTools port from stderr, connect to the page target, JSON-RPC (Runtime.evaluate, Page.navigate, Page.captureScreenshot, consoleAPICalled/Log.entryAdded). Screenshots land in `.project-agent/cache/screenshots/`. The browser launches lazily, is tracked by the CancellationController (no orphans), and is killed on session end. Where no browser exists, every tool returns a structured, actionable failure — the gate honestly reports BLOCKED rather than pretending verification happened.
+- **Image input** (Part 51): `/image <file|URL>` attaches a PNG/JPEG/GIF/WebP to the *next* instruction. The ManagerLoop gates on the provider's real `supportsVision` capability: images become `image_url` data-URI content parts on the wire only for vision-capable models; otherwise a system notice records the drop (never silently ignored). Verified end-to-end against the real provider: valid PNG attached → `IMAGE_RECEIVED` from the model.
+
+**Tested** — 8 new tests: entity decoding, DDG-Lite parsing (live-shape fixture: redirect unwrap, quote styles, snippet pairing, escaped+real tags), readable-text extraction, vision gating both ways (image parts sent to vision models, drop recorded for non-vision), browser-tool graceful degradation without a browser binary, browser evidence flowing through `verification_result` to the gate, wire-shape data-URI conversion. `npx tsc --noEmit` clean; **129/129** unit tests; scenario evals still 6/6.
+
+**Verified live** — `evals/phase8-web/live.sh` against `deepseek-v4.1`: web_search invoked → nodejs.org URL cited from read_url → `/image` accepted → model confirmed image receipt (`IMAGE_RECEIVED`) → browser_open failed gracefully on this Chromium-less box → no crashes. Also probed directly: the endpoint accepts image content parts, and the provider encodes our parts to `image_url` correctly on the wire.
+
+**Failed / learned** — the first parser assumed double-quoted attributes and `<a>` snippets; the live endpoint uses single quotes and `<td>` siblings, so search silently returned zero results until I probed the real HTML — **parse against the real thing, not the imagined shape**. The eval's first image fixture was a header-only 8-byte "PNG"; the model correctly refused to describe a truncated file, which proved the pipeline honest in both directions. A driver-side race (sending the question before the attach settled) produced one flaky FAIL; isolated probes re-proved the wire path before the rerun passed.
+
+**Remaining** — browser scroll/keyboard CDP coverage, Firefox/Safari (incomplete CDP — documented, not hidden), optional Playwright peer-package for complex flows, spec Phase 9 (multi-provider + native Anthropic + cost reporting), MCP, optimization phase.
+
+**Architecture changes** — network tools join the same registry/permission/risk/guard discipline as everything else; `ToolExecContext` now carries the cancellation signal; the browser is the first lazily-spawned long-lived resource with the same no-orphan guarantees as shell children; vision capability is consulted per model, not assumed.
+
 ## Phase 9.5 — Spec Part 61 commands + mandatory scenario evals (Parts 72–79)
 
 **Implemented**

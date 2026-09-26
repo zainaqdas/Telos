@@ -56,10 +56,11 @@ The Manager is the primary builder: it plans, edits, runs, and verifies. Workers
 - **Real cancellation** — Ctrl+C kills the whole process tree; no orphaned servers.
 - **Event-sourced history** — every task appends an auditable JSONL event log under `.project-agent/events/`.
 - **Focused context** — repo profile (languages, frameworks, commands, instructions) discovered incrementally, never dumped wholesale.
+- **Web + vision (zero-dep)** — `web_search` (DuckDuckGo Lite, keyless), `read_url` (readable-text extraction, source caching), `browser_*` tools driving your own Chromium over the DevTools Protocol (see `docs/browser-design.md`), and `/image` for attaching screenshots to the next message (sent only when the model supports vision).
 
 ## Slash commands
 
-`/help` `/status` `/profile` `/diff` `/collab` `/cancel` `/correct` `/model` `/exit`
+`/help` `/status` `/profile` `/diff` `/collab` `/image` `/undo` `/retry` `/compact` `/new` `/provider` `/models` `/waive` `/cancel` `/correct` `/model` `/exit`
 
 ## Configuration
 

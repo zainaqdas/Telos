@@ -23,7 +23,11 @@ export interface ToolExecContext {
   redact(text: string): string;
   maxOutputBytes: number;
   shellTimeoutSeconds: number;
-}export interface ToolDefinition {
+  /** Cancellation signal — network/shell tools should honor it. */
+  signal?: AbortSignal;
+}
+
+export interface ToolDefinition {
   name: string;
   description: string;
 

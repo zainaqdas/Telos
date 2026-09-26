@@ -73,12 +73,13 @@ export function lineDiff(before: string, after: string): { added: number; remove
 }
 
 /** Root context factory shared by all built-in tools. */
-export function makeContext(root: string, opts: { shellTimeoutSeconds: number; maxOutputBytes?: number }): ToolExecContext {
+export function makeContext(root: string, opts: { shellTimeoutSeconds: number; maxOutputBytes?: number; signal?: AbortSignal }): ToolExecContext {
   return {
     root,
     redact: makeRedact(),
     maxOutputBytes: opts.maxOutputBytes ?? 48_000,
     shellTimeoutSeconds: opts.shellTimeoutSeconds,
+    signal: opts.signal,
   };
 }
 

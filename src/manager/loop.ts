@@ -48,6 +48,8 @@ export interface ManagerDeps {
 
 export interface RunOptions {
   isCorrection?: boolean;
+  /** Images attached to this instruction (Part 51); sent only if the model supports vision. */
+  images?: Array<{ mediaType: string; data: string }>;
   /** Live UI hooks (streaming deltas, tool activity). */
   onText?: (delta: string) => void;
   onTool?: (name: string, argsSummary: string) => void;
@@ -175,7 +177,20 @@ export class ManagerLoop {
       }
     }
     const prefix = isCorrection ? "CORRECTION — highest priority, supersedes earlier instructions where they conflict: " : "";
-    this.messages.push({ role: "user", parts: [{ type: "text", text: `${prefix}${instruction}` }] });
+    const parts: Array<{ type: "text"; text: string } | { type: "image"; mediaType: string; data: string }> = [{ type: "text", text: `${prefix}${instruction}` }];
+    // Vision gating (Part 51): images are only sent when the provider reports
+    // support for the active model — otherwise the user is told, in-band.
+    const images = opts.images ?? [];
+    if (images.length > 0) {
+      const vision = this.deps.provider.capabilities(this.deps.model).supportsVision;
+      if (vision) {
+        for (const img of images) parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
+      } else {
+        this.pushSystemNotice(`Image input ignored: the active model (${this.deps.model}) does not support vision.`);
+        this.deps.events.append("task_updated", { notice: "image input dropped: model lacks vision support" });
+      }
+    }
+    this.messages.push({ role: "user", parts });
 
     let assistantText = "";
 

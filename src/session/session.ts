@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { loadConfig, STATE_DIRNAME } from "../config/loader.ts";
@@ -7,6 +7,8 @@ import { createProvider, resolveApiKey } from "../providers/index.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { registerFilesystemTools } from "../tools/fs-tools.ts";
 import { registerShellTools } from "../tools/shell-tools.ts";
+import { registerWebTools } from "../tools/web.ts";
+import { registerBrowserTools, closeBrowserSession } from "../tools/browser.ts";
 import { makeContext, installSecret } from "../tools/util.ts";
 import { BudgetEnforcer, type BudgetLimits } from "../runtime/usage.ts";
 import { CancellationController } from "../runtime/cancellation.ts";
@@ -65,6 +67,8 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   registerFilesystemTools(registry);
   const cancellation = new CancellationController();
   registerShellTools(registry, { cancellation });
+  registerWebTools(registry);
+  registerBrowserTools(registry, { cancellation });
 
   let taskId = `t-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
   let events = new EventLog(join(stateDir, "events"), taskId);
@@ -95,7 +99,9 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   }
 
   let gate = new CompletionGate(() => events.readAll());
-  const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds });
+  const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds, signal: cancellation.signal });
+  /** Images attached this session (Part 51): sent only when the model supports vision. */
+  const attachedImages: Array<{ mediaType: string; data: string; name: string }> = [];
 
   // Skill Engine (Phase 3): load + route deterministically; activation and
   // constraints are runtime-enforced.
@@ -228,6 +234,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   const shutdown = (code: number): void => {
     if (isRawSupported) stdin.setRawMode(false);
     stdin.removeListener("data", onKeypress);
+    void closeBrowserSession(); // no orphaned browser (same discipline as shell children)
     cancellation.cancel("session shutdown");
     // Only record cancellation if the task did not already complete —
     // a completed task must not also be marked cancelled in the log.
@@ -320,6 +327,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         lastInstruction,
         runInstruction,
         providerCapabilities: () => provider.capabilities(config.model.name),
+        attachedImages,
         compactNow: () => manager.compactNow(),
         resetTask: (newTaskId: string) => {
           // Fresh task identity: new EventLog + reset budget, gate and
@@ -354,8 +362,14 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     rendering = true;
     const started = Date.now();
     lastInstruction = text;
+    // Attached images (Part 51) ride with this instruction — only when the
+    // active model actually supports vision (Part 51: never send otherwise).
+    const images = attachedImages.splice(0, attachedImages.length);
     try {
-      const result = await manager.run(text, { isCorrection, onText: (delta) => printer.push(delta),
+      const result = await manager.run(text, {
+        isCorrection,
+        images: images.map((i) => ({ mediaType: i.mediaType, data: i.data })),
+        onText: (delta) => printer.push(delta),
         onTool: (name, summary) => {
           printer.newline();
           out(`  ⚙ ${name}  ${summary}`);
@@ -393,6 +407,7 @@ async function handleSlashCommand(
     orchestrator: Orchestrator;
     journal: EditJournal;
     lastInstruction: string;
+    attachedImages: Array<{ mediaType: string; data: string; name: string }>;
     runInstruction: (text: string, isCorrection: boolean) => Promise<void>;
     providerCapabilities: () => import("../providers/types.ts").Capabilities;
     compactNow: () => { compacted: boolean; removed: number; savedTokens: number };
@@ -450,6 +465,7 @@ async function handleSlashCommand(
         "/retry           re-run the previous instruction",
         "/compact         fold older transcript into a digest (corrections/blockers/requirements survive)",
         "/new, /clear     fresh task: clears transcript, journal, gate state (memory persists)",
+        "/image <file|URL>  attach an image to your next message (vision models only)",
         "/provider        list providers, key presence, and the active one",
         "/models          capabilities of the active model + known models for the provider",
         "/cancel          cancel the running task (works mid-run)",
@@ -558,6 +574,45 @@ async function handleSlashCommand(
       const taskId = `t-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
       deps.resetTask(taskId);
       out(`[fresh task ${taskId} — transcript, journal, and gate state cleared; memory persists]`);
+      return;
+    }
+    case "image": {
+      // Attach an image to the NEXT instruction (Part 51). Vision is checked
+      // at send time against the active model's real capabilities.
+      const target = args[0] ?? "";
+      if (!target) {
+        out("usage: /image <workspace-file.png|https://…> — attaches to your next message" + (deps.attachedImages.length ? ` (${deps.attachedImages.length} attached)` : ""));
+        return;
+      }
+      try {
+        let mediaType: string;
+        let data: string;
+        if (/^https?:\/\//i.test(target)) {
+          const res = await fetch(target, { signal: AbortSignal.timeout(20_000) });
+          if (!res.ok) {
+            out(`/image: HTTP ${res.status} for ${target}`);
+            return;
+          }
+          mediaType = res.headers.get("content-type")?.split(";")[0] ?? "image/png";
+          if (!/^image\//.test(mediaType)) {
+            out(`/image: not an image (${mediaType})`);
+            return;
+          }
+          data = Buffer.from(await res.arrayBuffer()).toString("base64");
+        } else {
+          const p = join(deps.projectRoot, target);
+          if (!existsSync(p)) {
+            out(`/image: file not found: ${target}`);
+            return;
+          }
+          mediaType = target.toLowerCase().endsWith(".jpg") || target.toLowerCase().endsWith(".jpeg") ? "image/jpeg" : target.toLowerCase().endsWith(".gif") ? "image/gif" : target.toLowerCase().endsWith(".webp") ? "image/webp" : "image/png";
+          data = readFileSync(p).toString("base64");
+        }
+        deps.attachedImages.push({ mediaType, data, name: target });
+        out(`[image attached: ${target} (${mediaType}, ${Math.round((data.length * 3) / 4 / 1024)} KB) — it will be sent with your next message]`);
+      } catch (err) {
+        out(`/image failed: ${(err as Error).message}`);
+      }
       return;
     }
     case "provider": {
