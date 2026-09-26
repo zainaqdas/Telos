@@ -11,6 +11,7 @@ import { makeContext } from "../src/tools/util.ts";
 import { BudgetEnforcer } from "../src/runtime/usage.ts";
 import { CancellationController } from "../src/runtime/cancellation.ts";
 import { EventLog } from "../src/events/log.ts";
+import { reduce } from "../src/events/state.ts";
 import { CompletionGate } from "../src/gate/gate.ts";
 import { ManagerLoop } from "../src/manager/loop.ts";
 import type { SynergonConfig } from "../src/config/schema.ts";
@@ -147,6 +148,35 @@ test("gate stays INCOMPLETE when the test run fails", async () => {
     assert.equal(result.status, "incomplete");
     assert.equal(result.gate?.verdict, "INCOMPLETE");
     assert.ok(h.events.readAll().some((e) => e.kind === "requirement_invalidated" && e.data["id"] === "tests-pass"));
+  } finally {
+    cleanup(h);
+  }
+});
+
+test("user correction invalidates satisfied requirements; fresh runtime evidence re-satisfies them", async () => {
+  const h = harness([
+    [callChunk("c1", "run_shell", JSON.stringify({ command: "node -e \"console.log('tests 5 passed')\"" }))],
+    [textChunk("Green.")],
+    // Correction turn: no tool calls, so the invalidation sticks.
+    [textChunk("Understood — redoing.")],
+    [callChunk("c2", "run_shell", JSON.stringify({ command: "node -e \"console.log('tests 7 passed')\"" }))],
+    [textChunk("Redo complete.")],
+  ]);
+  try {
+    const gate = () => new CompletionGate(() => h.events.readAll());
+    // Turn 1: a passing suite registers + satisfies `tests-pass`.
+    await h.loop.run("run the tests");
+    assert.equal(gate().evaluate().verdict, "COMPLETE");
+
+    // Turn 2: a correction invalidates every satisfied requirement…
+    await h.loop.run("redo it with jittered retries", { isCorrection: true });
+    assert.equal(reduce(h.events.readAll()).requirements.get("tests-pass")?.status, "invalidated");
+    assert.equal(gate().evaluate().verdict, "INCOMPLETE");
+
+    // …and a fresh passing run re-satisfies it (reducer replays the newest
+    // evidence last, so no re-add is needed — verified on the real path).
+    const result = await h.loop.run("run the tests again");
+    assert.equal(result.gate?.verdict, "COMPLETE", `gate summary: ${result.gate?.summary}`);
   } finally {
     cleanup(h);
   }

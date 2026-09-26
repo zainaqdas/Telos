@@ -3,6 +3,7 @@ import { ToolRegistry, type ToolDefinition } from "../tools/registry.ts";
 import type { BudgetEnforcer } from "../runtime/usage.ts";
 import type { EventLog } from "../events/log.ts";
 import { ROLES, parseWorkerReport, formatReportForManager, emptyReport, evaluateObjection, type WorkerRole, type WorkerReport } from "./roles.ts";
+import { workerExternalTools } from "../tools/external.ts";
 import { ManagerLoop } from "../manager/loop.ts";
 import type { Provider } from "../providers/types.ts";
 import type { ToolExecContext } from "../tools/registry.ts";
@@ -357,14 +358,37 @@ export class Orchestrator {
     let resolved = 0;
 
     // Blockers: resolve open ones whose id the decision names ('b-1' must not
-    // match 'b-10' — word-boundary match).
+    // match 'b-10' — word-boundary match). Users and models rarely know the
+    // runtime id, so when no id matched, fall back to a conservative
+    // paraphrase match: the single blocker whose significant tokens the
+    // statement covers best (≥ half, strictly best) wins. Ties and thin
+    // coverage resolve nothing — a wrong auto-resolution is worse than an
+    // unresolved blocker, which stays visible at the gate.
     const blockerIds = new Set(events.filter((e) => e.kind === "blocker").map((e) => String(e.data["id"] ?? "")));
     const resolvedBlockers = new Set(events.filter((e) => e.kind === "blocker_resolved").map((e) => String(e.data["id"] ?? "")));
+    let resolvedAnyById = false;
+    const openReasons = new Map<string, string>();
     for (const blockerId of blockerIds) {
       if (!blockerId || resolvedBlockers.has(blockerId)) continue;
-      if (!new RegExp(`\\b${blockerId}\\b`).test(text)) continue;
-      this.deps.events.append("blocker_resolved", { id: blockerId, by: id });
-      resolved += 1;
+      if (new RegExp(`\\b${blockerId}\\b`).test(text)) {
+        this.deps.events.append("blocker_resolved", { id: blockerId, by: id });
+        resolved += 1;
+        resolvedAnyById = true;
+      } else {
+        const reason = String(events.find((e) => e.kind === "blocker" && String(e.data["id"] ?? "") === blockerId)?.data["reason"] ?? "");
+        if (reason) openReasons.set(blockerId, reason);
+      }
+    }
+    if (!resolvedAnyById && openReasons.size > 0) {
+      // Humans paraphrase: "resolves the courier sandbox credentials blocker".
+      // Conservative matching: thin or ambiguous paraphrases resolve nothing —
+      // a wrong auto-resolution is worse than an unresolved blocker, which
+      // stays visible at the gate.
+      const best = bestParaphraseMatch(text, openReasons);
+      if (best) {
+        this.deps.events.append("blocker_resolved", { id: best, by: id });
+        resolved += 1;
+      }
     }
 
     // Objections: same id convention ('resolves obj-2'), plus statement-level
@@ -433,7 +457,7 @@ export class Orchestrator {
 
   /** One investigation cycle: scoped loop run → report parse → reconcile. */
   private async runCycle(session: WorkerSession, extraContext?: string, isRetry = false): Promise<DelegationResult> {
-    const scoped = this.scopedRegistry(ROLES[session.role].allowedTools);
+    const scoped = this.scopedRegistry(ROLES[session.role].allowedTools, session.role);
     const cycle = session.cycles + 1;
     const roleSpec = ROLES[session.role];
     const loop = new ManagerLoop({
@@ -568,10 +592,18 @@ export class Orchestrator {
     }
   }
 
-  /** Build a registry view containing only the role's allowed tools. */
-  private scopedRegistry(allowed: string[]): ToolRegistry {
+  /**
+   * Build a registry view containing only the role's allowlist plus external
+   * tools that explicitly declare this role in `worker_roles` (Phase 9):
+   * external commands stay manager-only unless the user names the role.
+   */
+  private scopedRegistry(allowed: string[], role: WorkerRole): ToolRegistry {
     const view = new ToolRegistry();
     for (const name of allowed) {
+      const tool = this.deps.registry.get(name);
+      if (tool) view.register(tool);
+    }
+    for (const name of workerExternalTools(this.deps.registry, role)) {
       const tool = this.deps.registry.get(name);
       if (tool) view.register(tool);
     }
@@ -581,4 +613,92 @@ export class Orchestrator {
   private failed(message: string): DelegationResult {
     return { workerId: "none", role: "explorer", report: emptyReport(message), tokens: 0, toolCalls: 0, error: message };
   }
+}
+
+const STOP_TOKENS = new Set([
+  "that", "this", "with", "from", "have", "has", "been", "being", "into", "cannot",
+  "them", "they", "were", "will", "would", "could", "should", "then", "than",
+  "when", "what", "where", "which", "while", "about", "after", "also", "only",
+  "some", "such", "there", "their", "these", "those", "your", "must", "more", "very",
+]);
+
+/** Crude deterministic suffix stem — enough to align simulate/simulating, measured/measuring… */
+function stemToken(w: string): string {
+  return w.replace(/(ings|ing|ies|ions|ion|ments|ment|ers|er|edly|ed|ly|s)$/i, "");
+}
+
+/** Lowercase stemmed significant tokens (≥4 chars, glue words removed). */
+function significantTokens(text: string): Set<string> {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 4 && !STOP_TOKENS.has(w))
+    .map(stemToken)
+    .filter((w) => w.length >= 4);
+  return new Set(words);
+}
+
+/** How many of `needles` appear in `haystack`. */
+function tokenCoverage(haystack: Set<string>, needles: Set<string>): { hits: number; total: number } {
+  let hits = 0;
+  for (const n of needles) if (haystack.has(n)) hits += 1;
+  return { hits, total: needles.size };
+}
+
+/**
+ * Match a decision statement to the single open blocker it paraphrases.
+ * Primary: lift "<desc> blocker(s)" phrases out of the statement (how humans
+ * actually refer to a blocker) and require ≥2/3 of the desc's significant
+ * tokens in the blocker's reason. Fallback: whole-statement token coverage
+ * with ≥half coverage and ≥3 hits. Strictly-best-only; ties resolve nothing.
+ */
+function bestParaphraseMatch(statementText: string, openReasons: Map<string, string>): string | undefined {
+  const reasonTokens = new Map<string, Set<string>>();
+  for (const [id, reason] of openReasons) reasonTokens.set(id, significantTokens(reason));
+
+  const descPhrases = [...statementText.matchAll(/\b(?:the|this|that)\s+([\w-][\w\s-]{1,80}?)\s+blockers?\b/gi)]
+    .map((m) => m[1] ?? "")
+    .filter((d) => significantTokens(d).size >= 2);
+  if (descPhrases.length > 0) {
+    let bestId: string | undefined;
+    let bestScore = 0;
+    let tie = false;
+    for (const desc of descPhrases) {
+      const descTokens = significantTokens(desc);
+      for (const [id, tokens] of reasonTokens) {
+        const { hits, total } = tokenCoverage(tokens, descTokens);
+        const score = total > 0 ? hits / total : 0;
+        if (score > bestScore) {
+          bestScore = score;
+          bestId = id;
+          tie = false;
+        } else if (bestScore > 0 && score === bestScore) {
+          tie = true;
+        }
+      }
+    }
+    if (bestId && bestScore >= 2 / 3 && !tie) return bestId;
+  }
+
+  const statementTokens = significantTokens(statementText);
+  let fallbackId: string | undefined;
+  let fallbackScore = 0;
+  let fallbackTie = false;
+  for (const [id, tokens] of reasonTokens) {
+    const { hits, total } = tokenCoverage(statementTokens, tokens);
+    const score = total > 0 ? hits / total : 0;
+    if (score > fallbackScore) {
+      fallbackScore = score;
+      fallbackId = id;
+      fallbackTie = false;
+    } else if (fallbackScore > 0 && score === fallbackScore) {
+      fallbackTie = true;
+    }
+  }
+  if (fallbackId && fallbackScore >= 0.5 && !fallbackTie) {
+    const { hits } = tokenCoverage(statementTokens, reasonTokens.get(fallbackId)!);
+    if (hits >= 3) return fallbackId;
+  }
+  return undefined;
 }

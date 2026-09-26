@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { STATE_DIRNAME } from "../config/loader.ts";
 import { parseToml, type TomlTable } from "../config/toml.ts";
 import type { ToolDefinition, ToolRegistry, ToolResult, ToolExecContext } from "./registry.ts";
+import type { WorkerRole } from "../workers/roles.ts";
 import { truncateOutput } from "./util.ts";
 import { CancellationController, killTree } from "../runtime/cancellation.ts";
 
@@ -32,6 +33,11 @@ export interface ExternalToolSpec {
   description: string;
   command: string;
   params: ExternalToolParam[];
+  /** Optional per-tool policy overrides (Phase 9 / Part 55). */
+  risk?: "low" | "medium" | "high";
+  permission?: "read" | "write" | "shell" | "network";
+  /** Worker roles that may use this tool; absent = manager-only. */
+  worker_roles?: WorkerRole[];
 }
 
 export interface ExternalToolParseResult {
@@ -134,7 +140,40 @@ export function parseExternalToolSpecs(root: TomlTable): ExternalToolParseResult
       });
     }
     if (!paramsOk) continue;
-    specs.push({ name, description, command, params });
+
+    // Optional policy overrides (Phase 9): default remains permission=shell,
+    // risk=high. Invalid values are hard errors — a policy line that silently
+    // no-ops is worse than a rejected declaration.
+    const risk = t["risk"];
+    if (risk !== undefined && risk !== "low" && risk !== "medium" && risk !== "high") {
+      errors.push(`[[tools.external]] "${name}": risk must be low|medium|high (got "${String(risk)}")`);
+      continue;
+    }
+    const permission = t["permission"];
+    if (permission !== undefined && permission !== "read" && permission !== "write" && permission !== "shell" && permission !== "network") {
+      errors.push(`[[tools.external]] "${name}": permission must be read|write|shell|network (got "${String(permission)}")`);
+      continue;
+    }
+    const workerRoles: WorkerRole[] = [];
+    const rawRoles = t["worker_roles"];
+    if (rawRoles !== undefined) {
+      if (!Array.isArray(rawRoles)) {
+        errors.push(`[[tools.external]] "${name}": worker_roles must be an array of role names`);
+        continue;
+      }
+      let rolesOk = true;
+      for (const r of rawRoles) {
+        if (r !== "explorer" && r !== "researcher" && r !== "reviewer" && r !== "qa") {
+          errors.push(`[[tools.external]] "${name}": worker_roles entries must be explorer|researcher|reviewer|qa (got "${String(r)}")`);
+          rolesOk = false;
+          break;
+        }
+        workerRoles.push(r);
+      }
+      if (!rolesOk) continue;
+    }
+
+    specs.push({ name, description, command, params, risk: risk as ExternalToolSpec["risk"], permission: permission as ExternalToolSpec["permission"], worker_roles: workerRoles });
   }
   return { specs, errors };
 }
@@ -169,9 +208,11 @@ export function externalToolDefinition(spec: ExternalToolSpec): ToolDefinition {
   return {
     name: spec.name,
     description: usage,
-    permission: "shell",
-    mutative: true,
-    risk: "high",
+    permission: spec.permission ?? "shell",
+    mutative: spec.permission === undefined || spec.permission !== "read",
+    risk: spec.risk ?? "high",
+    external: true,
+    workerRoles: spec.worker_roles ?? [],
     parameters: { type: "object", properties, required, additionalProperties: false },
     async execute(args, ctx) {
       const parts: string[] = [spec.command];
@@ -224,6 +265,22 @@ function runCommand(toolName: string, command: string, ctx: ToolExecContext): Pr
       settle(code === 0 ? { ok: true, output: "exit 0" } : { ok: false, output: `exit ${code ?? "signal"}`, meta: { exitCode: code }, errorCategory: "command_failed" });
     });
   });
+}
+
+/**
+ * External tool names whose manifest declares the given worker role
+ * (`worker_roles`, Phase 9). Reads the registry directly so the policy lives
+ * on the tool definition — no import cycle with the orchestrator.
+ */
+export function workerExternalTools(registry: ToolRegistry, role: WorkerRole): string[] {
+  const names: string[] = [];
+  for (const name of registry.names()) {
+    const tool = registry.get(name);
+    if (tool && tool.external === true && Array.isArray(tool.workerRoles) && (tool.workerRoles as string[]).includes(role)) {
+      names.push(name);
+    }
+  }
+  return names;
 }
 
 export interface ExternalToolRegistration {

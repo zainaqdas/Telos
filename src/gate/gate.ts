@@ -108,8 +108,8 @@ export class CompletionGate {
     // decision clears them, and objections whose debate verdict is
     // needs_decision block until a decision resolves them — the Manager
     // cannot complete a task past an unresolved disagreement.
-    const openBlockers = state.blockers.filter((b) => b.status === "open");
-    const waivedBlockers = state.blockers.filter((b) => b.status === "waived");
+    const openBlockers = state.blockers.filter((b) => b.status === "open" || (b.status === "waived" && b.waiverExpiresAt !== undefined && b.waiverExpiresAt <= Date.now()));
+    const waivedBlockers = state.blockers.filter((b) => b.status === "waived" && !(b.waiverExpiresAt !== undefined && b.waiverExpiresAt <= Date.now()));
     const undecidedObjections = state.objections.filter((o) => !o.resolved && o.debate?.verdict === "needs_decision");
 
     let verdict: GateVerdict;
@@ -125,7 +125,10 @@ export class CompletionGate {
     if (invalidated.length) parts.push(`invalidated: ${invalidated.join(", ")}`);
     if (unverifiedWrites) parts.push("workspace was modified but nothing was run to verify it");
     if (changeRequestedButNotMade) parts.push("instruction requested changes but no workspace change or verification occurred");
-    for (const b of openBlockers) parts.push(`open blocker ${b.id}: ${clip(b.reason)} — resolve via the decision tool`);
+    for (const b of openBlockers) {
+      const expired = b.status === "waived";
+      parts.push(`open blocker ${b.id}${expired ? " (waiver expired)" : ""}: ${clip(b.reason)} — resolve via the decision tool${expired ? " or re-waive via /waive" : ""}`);
+    }
     for (const b of waivedBlockers) parts.push(`waived blocker ${b.id}: ${clip(b.reason)} (user waived via /waive)`);
     for (const o of undecidedObjections) parts.push(`objection ${o.id || "(legacy)"} awaits a decision: ${clip(o.statement)}`);
     for (const s of skillAudit) {

@@ -108,7 +108,7 @@ export interface TeamState {
   requirements: Map<string, RequirementRecord>;
   decisions: Array<{ id: string; statement: string; reason?: string; status: "active" | "superseded"; t: number }>;
   objections: Array<{ id: string; statement: string; raisedBy: string; t: number; resolved: boolean; debate?: { verdict: "upheld" | "dismissed" | "needs_decision"; rationale: string } }>;
-  blockers: Array<{ id: string; reason: string; status: "open" | "resolved" | "waived"; t: number }>;
+  blockers: Array<{ id: string; reason: string; status: "open" | "resolved" | "waived"; t: number; /** Epoch ms after which a user waiver lapses and the blocker is open again (Part 95). */ waiverExpiresAt?: number }>;
   findings: Array<{ text: string; source: string; t: number }>;
   /** Worker proposals (Part 91): first-class, status tracks correction invalidation. */
   proposals: Map<string, { statement: string; raisedBy: string; status: "active" | "invalidated" | "superseded" | "needs_rework"; t: number }>;

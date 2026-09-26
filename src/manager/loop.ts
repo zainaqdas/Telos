@@ -434,14 +434,18 @@ export class ManagerLoop {
   }
 
   /**
-   * Satisfy pending skill-owned requirements whose id carries the given
-   * suffix (skill checklist convention: *-reproduce, *-fix, *-verify).
-   * Evidence always comes from an executed tool, never from model prose.
+   * Satisfy skill-owned requirements whose id carries the given suffix
+   * (skill checklist convention: *-reproduce, *-fix, *-verify). Both pending
+   * and invalidated items qualify: a user correction invalidates satisfied
+   * checklists wholesale, and fresh runtime evidence is exactly what re-earns
+   * them — an invalidated checklist that could never recover would block the
+   * gate forever after any correction. Evidence always comes from an executed
+   * tool, never from model prose.
    */
   private satisfySkillRequirements(suffix: string, observation: string, source: string): void {
     const state = reduce(this.deps.events.readAll());
     for (const [id, req] of state.requirements) {
-      if (req.skill && req.status === "pending" && id.endsWith(suffix)) {
+      if (req.skill && (req.status === "pending" || req.status === "invalidated") && id.endsWith(suffix)) {
         this.deps.events.append("requirement_satisfied", { id, source, producer: "runtime", observation });
       }
     }

@@ -13,6 +13,7 @@ import {
   externalToolDefinition,
   registerExternalTools,
   shellQuote,
+  workerExternalTools,
 } from "../src/tools/external.ts";
 import { parseToml } from "../src/config/toml.ts";
 import { ToolRegistry } from "../src/tools/registry.ts";
@@ -362,4 +363,75 @@ test("a waived blocker cannot be re-opened and an open one cannot be waived twic
     ev(3, "blocker_waived", { id: "b-1", reason: "ok again" }),
   ]);
   assert.equal(state.blockers[0]?.status, "waived");
+});
+
+// ─── Phase 9: manifest policy overrides ──────────────────────────────────────
+
+test("policy overrides: risk/permission/worker_roles compile onto the ToolDefinition", () => {
+  const { specs } = parseExternalToolSpecs(parseToml(`
+[[tools.external]]
+name = "lint_gate"
+command = "lint-tool check"
+description = "run the repo linter"
+risk = "medium"
+permission = "read"
+worker_roles = ["qa", "reviewer"]
+
+[[tools.external.params]]
+key = "path"
+type = "string"
+required = false
+`) as never);
+  const spec = specs[0]!;
+  assert.equal(spec.risk, "medium");
+  assert.equal(spec.permission, "read");
+  assert.deepEqual(spec.worker_roles, ["qa", "reviewer"]);
+  const tool = externalToolDefinition(spec);
+  assert.equal(tool.risk, "medium");
+  assert.equal(tool.permission, "read");
+  assert.equal(tool.mutative, false, "permission read ⇒ not mutative");
+  assert.deepEqual(tool.workerRoles, ["qa", "reviewer"]);
+  assert.equal(tool.external, true);
+});
+
+test("policy defaults stay shell/high and manager-only when no overrides are declared", () => {
+  const tool = externalToolDefinition({
+    name: "plain_tool",
+    description: "no overrides",
+    command: "echo hi",
+    params: [],
+  });
+  assert.equal(tool.risk, "high");
+  assert.equal(tool.permission, "shell");
+  assert.equal(tool.mutative, true);
+  assert.deepEqual(tool.workerRoles, []);
+});
+
+test("invalid policy values are hard parse errors (a policy line must not silently no-op)", () => {
+  const { specs, errors } = parseExternalToolSpecs(parseToml(`
+[[tools.external]]
+name = "bad_risk"
+command = "echo"
+risk = "cosmic"
+
+[[tools.external]]
+name = "bad_roles"
+command = "echo"
+worker_roles = ["intern"]
+`) as never);
+  assert.equal(specs.length, 0);
+  assert.equal(errors.length, 2);
+  assert.ok(errors[0]!.includes("risk must be low|medium|high"));
+  assert.ok(errors[1]!.includes("worker_roles entries must be"));
+});
+
+// ─── Phase 9: worker roles gain explicitly-declared external tools ───────────
+
+test("workerExternalTools: roles see exactly the external tools that declare them", () => {
+  const registry = new ToolRegistry();
+  registry.register(externalToolDefinition({ name: "lint_gate", description: "l", command: "echo", params: [], worker_roles: ["qa"] }));
+  registry.register(externalToolDefinition({ name: "deploy_helper", description: "d", command: "echo", params: [] }));
+  assert.deepEqual(workerExternalTools(registry, "qa"), ["lint_gate"]);
+  assert.equal(workerExternalTools(registry, "explorer").length, 0, "undeclared role gets nothing");
+  assert.equal(workerExternalTools(registry, "reviewer").length, 0, "manager-only tool hidden from workers");
 });

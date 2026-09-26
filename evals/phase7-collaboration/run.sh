@@ -140,18 +140,19 @@ rm -f "$FIFO"
 mkfifo "$FIFO"
 : > "$LOG"; : > "$TRACE"
 
-node --experimental-strip-types "$ROOT/src/index.ts" chat < "$FIFO" > "$LOG" 2>&1 &
+( cd "$DIR" && exec node --experimental-strip-types "$ROOT/src/index.ts" chat < "$FIFO" > "$LOG" 2>&1 ) &
 CHILD=$!
 exec 3> "$FIFO"
 
 wait_prompt() {
   for _ in $(seq 1 240); do
-    last=$(grep -v '^[[:space:]]*$' "$LOG" | tail -n 1)
+    last=$(grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -n 1 || true)
     case "$last" in "> "*) return 0;; esac
     sleep 1
   done
+  echo "eval: prompt timeout waiting for the agent" >&2
   echo "=== wait_prompt TIMEOUT ===" >> "$LOG"
-  return 1
+  exit 1
 }
 
 send() {
@@ -170,15 +171,17 @@ wait_prompt; sleep 2
 # 3) Correction: kills the Redis proposal (needs_rework) and resumes the waiting reviewer.
 send '/correct Do NOT add Redis or any external service or dependency; notifyShipment must stay dependency-free with in-process throttling only (option B).'
 wait_prompt; sleep 2
-# 4) Resolve the credentials blocker, finish the work, verify.
-send 'Continue: FIRST record a decision with statement "resolves the courier sandbox credentials blocker: credentials are permanently unavailable; rate limiting is validated by the unit simulation in test/rate-limit.test.js instead". THEN implement in-process throttling with jittered retry in src/notify.js per the correction (no Redis), run npm test, and iterate until it passes.'
+# 4) Resolve the credentials blocker (paraphrased — no runtime id), redo the
+#    work red-first so the correction-invalidated tffb checklist re-satisfies.
+send 'Continue: FIRST record a decision with statement "resolves the courier sandbox credentials blocker: credentials are permanently unavailable; rate limiting is validated by the unit simulation in test/rate-limit.test.js instead". THEN work test-first, in this exact order: (1) create test/repro.js that calls notifyShipment with 10 ids and asserts res.throttled > 0; (2) run node test/repro.js and note that it FAILS with throttled = 0 — that failure is the reproduction; (3) implement in-process throttling with jittered retry in src/notify.js per the correction (no Redis); (4) re-run node test/repro.js until it passes, then run npm test until all tests pass; (5) remove test/repro.js with rm. Follow these steps in order.'
 wait_prompt; sleep 2
 send '/collab'
 send '/status'
 send '/exit'
 
-wait $CHILD
-echo "child exited status $? @$(date +%T)" >> "$TRACE"
+CHILD_RC=0
+wait "$CHILD" || CHILD_RC=$?
+echo "child exited status $CHILD_RC @$(date +%T)" >> "$TRACE"
 
 # ── Audit ─────────────────────────────────────────────────────────────────────
 AUDIT_RC=0

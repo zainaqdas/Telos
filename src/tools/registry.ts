@@ -23,17 +23,20 @@ export interface ToolExecContext {
   redact(text: string): string;
   maxOutputBytes: number;
   shellTimeoutSeconds: number;
-}
-
-export interface ToolDefinition {
+}export interface ToolDefinition {
   name: string;
   description: string;
+
   /** JSON-schema subset: { type:"object", properties, required } */
   parameters: Record<string, unknown>;
   permission: ToolPermission;
   /** Mutating tools are subject to the single-writer rule + repetition guard. */
   mutative: boolean;
   risk: ToolRisk;
+  /** Marks a user-declared external tool (optional policy surface, Phase 9). */
+  external?: boolean;
+  /** Worker roles allowed to use this tool when `external` is set. */
+  workerRoles?: readonly string[];
   execute(args: Record<string, unknown>, ctx: ToolExecContext): Promise<ToolResult>;
 }
 

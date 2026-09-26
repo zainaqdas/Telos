@@ -209,8 +209,23 @@ function apply(state: TeamState, ev: AgentEvent): void {
     case "blocker_waived": {
       // A USER decision (Part 95): the /waive slash command is the only writer.
       // Waived blockers stop blocking the gate but stay visible as waived.
+      // A TTL makes the waiver a temporary reprieve (Phase 9): after the
+      // deadline the gate treats the blocker as open again. The deadline is
+      // anchored to the event's own timestamp so replays are deterministic;
+      // `expires_at` (absolute epoch ms) takes precedence when the writer
+      // supplied it.
       const b = state.blockers.find((bl) => bl.id === str(d["id"]));
-      if (b) b.status = "waived";
+      if (b) {
+        b.status = "waived";
+        const expiresAt = d["expires_at"];
+        const ttlHours = d["expires_in_hours"];
+        if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0) {
+          b.waiverExpiresAt = expiresAt;
+        } else if (typeof ttlHours === "number" && Number.isFinite(ttlHours) && ttlHours > 0) {
+          const startedAt = state.task.startedAt || Date.now() - ev.t;
+          b.waiverExpiresAt = startedAt + ev.t + ttlHours * 3_600_000;
+        }
+      }
       break;
     }
     case "delegation":

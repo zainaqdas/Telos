@@ -375,7 +375,7 @@ async function handleSlashCommand(
         "/skills          list loaded skills (source, checklist, constraints)",
         "/memory          show durable memory (rules, lessons, rejected approaches)",
         "/collab          open proposals, blockers, and unresolved objections",
-        "/waive <id>      waive an open blocker (user-only; stays visible as waived)",
+        "/waive <id> [for <Nh|Nd>] [reason]   waive an open blocker (user-only; optional expiry, then it is open again)",
         "/cancel          cancel the running task",
         "/correct <text>  send a correction (highest priority, invalidates conflicting work)",
         "/model           show configured model (change via config/env)",
@@ -424,16 +424,29 @@ async function handleSlashCommand(
     case "waive": {
       // User-only waiver (Part 95): no model-facing tool exists for this — a
       // waiver is a human decision, recorded as a blocker_waived event.
+      // Optional `for Nh` makes it a temporary reprieve (Phase 9): after the
+      // TTL the gate treats the blocker as open again.
       const id = args[0] ?? "";
       const state = reduce(deps.events.readAll());
-      const blocker = state.blockers.find((b) => b.id === id && b.status === "open");
+      const openBlockers = state.blockers.filter((b) => b.status === "open");
+      const blocker = openBlockers.find((b) => b.id === id);
       if (!blocker) {
-        const open = state.blockers.filter((b) => b.status === "open").map((b) => b.id);
-        out(`usage: /waive <blocker-id> — open blockers: ${open.join(", ") || "(none)"}`);
+        out(`usage: /waive <blocker-id> [reason] | /waive <blocker-id> for <Nh|Nd> [reason] — open blockers: ${openBlockers.map((b) => b.id).join(", ") || "(none)"}`);
         return;
       }
-      deps.events.append("blocker_waived", { id: blocker.id, reason: args.slice(1).join(" ") || "user waived via /waive" });
-      out(`[blocker ${blocker.id} waived — stays visible as waived; gate no longer blocked by it]`);
+      let ttlHours: number | undefined;
+      let reasonParts = args.slice(1);
+      const forIdx = reasonParts.findIndex((w) => /^for$/i.test(w));
+      if (forIdx >= 0 && typeof reasonParts[forIdx + 1] === "string") {
+        const m = /^(\d+(?:\.\d+)?)(h|d)$/i.exec(String(reasonParts[forIdx + 1]));
+        if (m) {
+          ttlHours = Number(m[1]) * (m[2]?.toLowerCase() === "d" ? 24 : 1);
+          reasonParts = [...reasonParts.slice(0, forIdx), ...reasonParts.slice(forIdx + 2)];
+        }
+      }
+      const event = { id: blocker.id, reason: reasonParts.join(" ") || "user waived via /waive" };
+      deps.events.append("blocker_waived", ttlHours !== undefined ? { ...event, expires_at: Date.now() + ttlHours * 3_600_000 } : event);
+      out(`[blocker ${blocker.id} waived${ttlHours !== undefined ? ` for ${ttlHours}h — the gate treats it as open again after that` : " — stays visible as waived; gate no longer blocked by it"}]`);
       return;
     }
     case "cancel":

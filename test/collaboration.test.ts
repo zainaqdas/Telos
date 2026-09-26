@@ -366,6 +366,44 @@ test("gate BLOCKED on needs_decision objection; resolving decision unblocks; dis
   }
 });
 
+test("decision paraphrasing the blocker (no id) resolves the single unambiguous open blocker", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-c14-"));
+  try {
+    const provider = new ScriptedProvider([[{ type: "text_delta", text: "FINDING: x\nBLOCKER: the courier sandbox credentials are unavailable, so live rate behavior cannot be measured" }]]);
+    const { events, orchestrator } = setup(dir, provider);
+    await orchestrator.runDelegation({ role: "qa", question: "check the courier integration" });
+
+    // Real users never know the runtime id — they describe the blocker.
+    const n = orchestrator.recordDecision("resolves the courier sandbox credentials blocker: credentials are permanently unavailable; the unit simulation covers it instead", "substitute evidence accepted");
+    assert.equal(n, 1, "paraphrased statement must resolve the open blocker");
+    assert.equal(reduce(events.readAll()).blockers[0]?.status, "resolved");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ambiguous or thin paraphrases resolve nothing (conservative fallback)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "syn-c15-"));
+  try {
+    const provider = new ScriptedProvider([[{ type: "text_delta", text: "FINDING: x\nBLOCKER: the courier sandbox credentials are unavailable for live measurement\nBLOCKER: the payment gateway credentials are missing from the vault" }]]);
+    const { events, orchestrator } = setup(dir, provider);
+    await orchestrator.runDelegation({ role: "qa", question: "check external integrations" });
+
+    // "credentials" appears in both reasons — a vague statement must not pick one.
+    assert.equal(orchestrator.recordDecision("credentials will be provided later, proceed without them"), 0);
+    assert.ok(reduce(events.readAll()).blockers.every((b) => b.status === "open"));
+
+    // A statement that clearly covers only one blocker's tokens resolves exactly that one.
+    const n = orchestrator.recordDecision("resolves the blocker: the payment gateway vault missing issue is settled by the new secret reference");
+    assert.equal(n, 1);
+    const state = reduce(events.readAll());
+    assert.equal(state.blockers.find((b) => b.reason.includes("courier"))?.status, "open");
+    assert.equal(state.blockers.find((b) => b.reason.includes("payment"))?.status, "resolved");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("legacy no-id objection is still resolvable by statement and can block the gate", async () => {
   const dir = mkdtempSync(join(tmpdir(), "syn-c12-"));
   try {
@@ -449,4 +487,27 @@ test("parallel delegations keep write tools stripped until the last worker finis
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─── Phase 9: waiver expiry ───────────────────────────────────────────────────
+
+test("waiver with expires_in_hours re-opens the blocker at the gate after the deadline", () => {
+  // Long TTL: waived stays waived.
+  const future = ev(1, "blocker", { id: "b-1", reason: "staging db not reachable" });
+  const waived = ev(2, "blocker_waived", { id: "b-1", reason: "known outage", expires_in_hours: 24 });
+  const gateFuture = new CompletionGate(() => [future, waived]);
+  const report = gateFuture.evaluate();
+  assert.equal(report.verdict, "COMPLETE");
+  assert.ok(report.summary.includes("waived by user: b-1"), `waived listed: ${report.summary}`);
+
+  // Expired: same events, but the absolute deadline has passed (the exact
+  // shape the /waive command writes — Date.now() + ttl at issuance).
+  const deadline = Date.now() + 24 * 3_600_000;
+  const expired = ev(2, "blocker_waived", { id: "b-1", reason: "known outage", expires_at: deadline - 25 * 3_600_000 });
+  const state2 = reduce([future, expired]);
+  assert.equal(state2.blockers[0]?.status, "waived");
+  const gateExpired = new CompletionGate(() => [future, expired]);
+  const r2 = gateExpired.evaluate();
+  assert.equal(r2.verdict, "BLOCKED", "expired waiver must block again");
+  assert.ok(r2.summary.includes("waiver expired"), `summary names expiry: ${r2.summary}`);
 });

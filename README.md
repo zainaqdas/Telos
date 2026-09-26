@@ -83,6 +83,9 @@ confirm_destructive = true
 # [[tools.external]]
 # name = "deploy_preview"        # exposed as a first-class tool to the Manager
 # command = "bin/deploy-preview" # single invocation; args appended as quoted literals
+# risk = "medium"                # optional override; default high
+# permission = "network"         # optional override; default shell
+# worker_roles = ["qa"]          # optional; worker roles allowed to call it (default manager-only)
 # [[tools.external.params]]
 # key = "env"
 # type = "string"
