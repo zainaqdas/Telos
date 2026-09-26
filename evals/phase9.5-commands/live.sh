@@ -74,14 +74,22 @@ send "/undo"
 sleep 1
 if [ -f "$DIR/hello.txt" ]; then echo "MARKER: undo FAILED - hello.txt still exists" >> "$TRACE"; else echo "MARKER: undo OK - hello.txt removed" >> "$TRACE"; fi
 
-# recreate so /retry has something to chew on
-send 'Create hello.txt again containing: version-two'
+# recreate so /retry has something to chew on. Unambiguous imperative — no
+# "again" phrasing, which invites the model to ask a clarifying question.
+send 'Create a file named hello.txt containing exactly: version-two'
 wait_prompt; sleep 1
 
 # 3) /retry: replays the previous instruction
 send "/retry"
 wait_prompt; sleep 1
-grep -q "version-two" "$DIR/hello.txt" 2>/dev/null && echo "MARKER: retry OK - file intact after replay" >> "$TRACE" || echo "MARKER: retry INCONCLUSIVE" >> "$TRACE"
+# The replay turn may still be finishing when the prompt marker reappears;
+# poll briefly for the file rather than one-shot-grepping.
+retry_ok=""
+for i in $(seq 1 20); do
+  if grep -q "version-two" "$DIR/hello.txt" 2>/dev/null; then retry_ok=1; break; fi
+  sleep 1
+done
+if [ -n "$retry_ok" ]; then echo "MARKER: retry OK - file intact after replay" >> "$TRACE"; else echo "MARKER: retry INCONCLUSIVE" >> "$TRACE"; fi
 
 # 4) /new: fresh task id + budget; then a mid-run /cancel
 send "/new"
