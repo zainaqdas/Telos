@@ -65,12 +65,16 @@ export class SkillRouter {
         }
       }
 
-      // Tier 3: file-pattern evidence from the repo profile.
+      // Tier 3: file-pattern evidence from the REPO profile only. Matching
+      // the instruction text here caused false activations (e.g. the bugfix
+      // skill activating for a greenfield build that merely mentions
+      // "test/app.test.js"), and an unsatisfiable reproduce checklist can
+      // block the gate forever on tasks that have no bug at all.
       if (this.deps.profile) {
         const profileText = `${this.deps.profile.entryPoints.join(" ")} ${this.deps.profile.keyDirs.join(" ")}`;
         for (const pattern of skill.filePatterns) {
           const stem = pattern.replace(/[*]/g, "").replace(/\.([a-z]+)$/, "");
-          if (stem && (profileText.includes(stem) || instruction.toLowerCase().includes(stem))) {
+          if (stem && profileText.includes(stem)) {
             score += 2;
             reasons.push(`file evidence "${pattern}"`);
             break;
