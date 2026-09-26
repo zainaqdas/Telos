@@ -1,5 +1,6 @@
 import type { AgentEvent, RequirementRecord, TeamState } from "../events/types.ts";
 import { reduce } from "../events/state.ts";
+import type { StateStore } from "../events/state-store.ts";
 
 /**
  * The Completion Gate (Parts 17–21) — exactly one completion authority.
@@ -34,10 +35,10 @@ export interface GateReport {
 }
 
 export class CompletionGate {
-  private readonly events: () => AgentEvent[];
+  private readonly source: (() => AgentEvent[]) | StateStore;
 
-  constructor(events: () => AgentEvent[]) {
-    this.events = events;
+  constructor(source: (() => AgentEvent[]) | StateStore) {
+    this.source = source;
   }
 
   /**
@@ -46,8 +47,19 @@ export class CompletionGate {
    * whose evidence producer is the model's say-so alone.
    */
   evaluate(input: GateInput = {}): GateReport {
-    const events = this.events();
-    const state = reduce(events);
+    // Store-backed (incremental, O(1) amortized) when available; the legacy
+    // function source re-reads and re-reduces per call (kept for tests).
+    const src = this.source;
+    let state: TeamState;
+    let events: readonly AgentEvent[];
+    if (typeof src === "function") {
+      const snap = src();
+      state = reduce(snap);
+      events = snap;
+    } else {
+      events = src.events();
+      state = src.current();
+    }
     const requirements = [...state.requirements.values()];
     const required = requirements.filter((r) => r.required);
     const waived = new Set(input.waive ?? []);

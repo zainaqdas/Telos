@@ -45,7 +45,13 @@ function makeBudget(
   };
 }
 
-function apply(state: TeamState, ev: AgentEvent): void {
+/**
+ * Apply one event to a state (exported for StateStore's incremental folding).
+ * Purity contract (Part 14): the same event applied to the same state produces
+ * the same transition as a full reduce replay — wall-clock derivations inside
+ * (e.g. evidence timestamps) are display fields, not decisions.
+ */
+export function apply(state: TeamState, ev: AgentEvent): void {
   const d = ev.data;
   switch (ev.kind) {
     case "task_started": {

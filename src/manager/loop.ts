@@ -8,7 +8,9 @@ import { compactMessages } from "../runtime/compact.ts";
 import type { CancellationController } from "../runtime/cancellation.ts";
 import type { EventLog } from "../events/log.ts";
 import { reduce } from "../events/state.ts";
+import type { TeamState } from "../events/types.ts";
 import type { CompletionGate, GateReport } from "../gate/gate.ts";
+import type { StateStore } from "../events/state-store.ts";
 import type { SynergonConfig } from "../config/schema.ts";
 import type { SkillRouter } from "../skills/router.ts";
 import { FailureLearner } from "../memory/pipeline.ts";
@@ -30,6 +32,8 @@ export interface ManagerDeps {
   cancellation: CancellationController;
   ctx: ToolExecContext;
   gate?: CompletionGate;
+  /** Incremental derived state (Part 96): preferred over re-reducing the log. */
+  stateStore?: StateStore;
   guard?: RepetitionGuard;
   skillRouter?: SkillRouter;
   learner?: FailureLearner;
@@ -441,9 +445,18 @@ export class ManagerLoop {
     }
   }
 
+  /**
+   * Derived TeamState for internal decisions (Part 96): uses the incremental
+   * store when wired; falls back to a full reduce otherwise (worker loops).
+   */
+  private derivedState(): TeamState {
+    if (this.deps.stateStore) return this.deps.stateStore.current();
+    return reduce(this.deps.events.readAll());
+  }
+
   /** Create a requirement on first sight; satisfy on success, invalidate on failure. */
   private ensureRequirement(id: string, description: string, ok: boolean): void {
-    const state = reduce(this.deps.events.readAll());
+    const state = this.derivedState();
     const existing = state.requirements.get(id);
     if (!existing) this.deps.events.append("requirement_added", { id, description, required: true });
     if (ok) this.deps.events.append("requirement_satisfied", { id, source: "tool:run_shell", producer: "runtime", observation: "verification command succeeded" });
@@ -512,7 +525,7 @@ export class ManagerLoop {
    * tool, never from model prose.
    */
   private satisfySkillRequirements(suffix: string, observation: string, source: string): void {
-    const state = reduce(this.deps.events.readAll());
+    const state = this.derivedState();
     for (const [id, req] of state.requirements) {
       if (req.skill && (req.status === "pending" || req.status === "invalidated") && id.endsWith(suffix)) {
         this.deps.events.append("requirement_satisfied", { id, source, producer: "runtime", observation });
@@ -543,7 +556,7 @@ export class ManagerLoop {
   private async checkSkillConstraints(toolName: string): Promise<string | null> {
     const router = this.deps.skillRouter;
     if (!router) return null;
-    const state = reduce(this.deps.events.readAll());
+    const state = this.derivedState();
     const warnings: string[] = [];
     for (const skill of state.skills.values()) {
       const def = router.skills.find((s) => s.name === skill.name);

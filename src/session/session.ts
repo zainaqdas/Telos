@@ -17,6 +17,7 @@ import { makeContext, installSecret } from "../tools/util.ts";
 import { BudgetEnforcer, type BudgetLimits } from "../runtime/usage.ts";
 import { CancellationController } from "../runtime/cancellation.ts";
 import { EventLog } from "../events/log.ts";
+import { StateStore } from "../events/state-store.ts";
 import { reduce } from "../events/state.ts";
 import { CompletionGate } from "../gate/gate.ts";
 import { ManagerLoop } from "../manager/loop.ts";
@@ -76,6 +77,9 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   let taskId = `t-${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(36).slice(2, 6)}`;
   let events = new EventLog(join(stateDir, "events"), taskId);
+  // Incremental derived state (Part 96): the gate consumes this instead of
+  // re-reading and re-reducing the whole JSONL log after every tool result.
+  const stateStore = new StateStore(events);
   const limits: BudgetLimits = {
     maxTotalTokens: config.runtime.maxTotalTokens,
     maxToolCalls: config.runtime.maxToolCalls,
@@ -103,7 +107,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     repoProfile = undefined; // profiling must never block a session
   }
 
-  let gate = new CompletionGate(() => events.readAll());
+  let gate = new CompletionGate(stateStore);
   const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds, signal: cancellation.signal });
   // Mutable so a cancellation-scope reset can re-issue the live signal.
   /** Images attached this session (Part 51): sent only when the model supports vision. */
@@ -174,6 +178,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     config,
     registry,
     events,
+    stateStore,
     budget,
     cancellation,
     ctx,
@@ -262,6 +267,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     stdin.removeListener("data", onKeypress);
     void closeBrowserSession(); // no orphaned browser (same discipline as shell children)
     closeMcpClients(mcpClients); // MCP servers die with the session
+    stateStore.dispose(); // release the append listener
     cancellation.cancel("session shutdown");
     // Only record cancellation if the task did not already complete —
     // a completed task must not also be marked cancelled in the log.
@@ -371,8 +377,10 @@ export async function runSession(opts: SessionOpts): Promise<number> {
             max_wall_time_seconds: limits.maxWallTimeSeconds,
           } });
           events = fresh;
-          gate = new CompletionGate(() => events.readAll());
+          stateStore.attach(fresh);
+          gate = new CompletionGate(stateStore);
           manager.attachEvents(fresh);
+          stateStore.attach(fresh);
           orchestrator.attachEvents(fresh);
           budget.resetUsage();
         },

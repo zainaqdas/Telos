@@ -1,5 +1,29 @@
 # Synergon — Phase Reports
 
+## Phase 11 (spec Part 96) — Optimization: Measured, Then Done
+
+**Doctrine first** — Part 96 says "Only after real usage … Measure before optimizing." So this phase shipped a **benchmark** before a single optimization: `evals/bench.ts` (`npm run bench`) drives the runtime's per-turn hot paths over a synthetic 2000-event task log and reports ms/op for event-log reads, gate evaluation, memory retrieval, skill routing, and transcript token accounting.
+
+**What the numbers indicted** — baseline on a 2000-event session with 400 gate evaluations (the loop evaluates the gate after every tool result):
+
+| Path | Baseline | After |
+|---|---|---|
+| `gate.evaluate()` (re-read + re-reduce whole JSONL per call) | **5.19 ms/call** · ~2.08 s per task | **0.063 ms/call** · ~25 ms per task (**82×**) |
+| Memory retrieval (500-record store) | 0.54 ms/instruction | unchanged — already cache-backed, not a hotspot |
+| Skill routing (5 skills) | 0.004 ms/instruction | unchanged — deterministic tiers are cheap |
+| Transcript token accounting (100 msgs) | 0.004 ms | unchanged |
+
+**Implemented**
+
+- **`EventLog.onAppend`** — push notification after the durable write succeeds; listener exceptions are contained so a broken observer can never fail an append. Single-writer discipline (one `EventLog` instance per task, rebound via `attachEvents`/`stateStore.attach` on `/new`) makes the push model sound.
+- **`StateStore`** (`src/events/state-store.ts`) — incremental derived state: the reducer's pure `apply` is now exported, and the store folds each event into the cached `TeamState` exactly once. `current()`/`events()` are O(1) views; `attach()` re-derives for a fresh task; `rebuild()` recovers from the log (the log stays the authority); `dispose()` releases the listener at shutdown.
+- **Gate + loop rewiring** — `CompletionGate` accepts a `StateStore` (all 27 legacy function-source call sites in tests/evals keep working unchanged); the session and the Manager loop's internal state reads (`ensureRequirement`, `satisfySkillConstraints`, `checkSkillConstraints`) consume the store instead of re-reading the log.
+- **Retrieval/prompt paths audited, not churned** — measurement showed memory query, skill routing, and token accounting are all sub-millisecond and already cache-backed; the system prompt is a fixed ~2 KB with a bounded repo profile. Per Part 96's own doctrine, these were left alone.
+
+**Tested** — 5 new tests in `test/state-store.test.ts`: incremental fold ≡ full reduce asserted after *every* append in a 40-event stream (requirements, blockers, findings, instructions, budget counters, task status), `/new` rebind (old log can't leak in, fresh log folds), `rebuild()`/`dispose()` semantics (log is authority; disposed store stops folding), broken-listener containment, and gate verdict equivalence between store-backed and function-backed sources across a verdict-changing event sequence. `npx tsc --noEmit` clean; **151/151** unit tests; scenarios 6/6.
+
+**Remaining** — same hot path inside worker sessions (workers still full-reduce; their logs are small and task-scoped), SSE/HTTP MCP transports, Anthropic live-key verification.
+
 ## Phase 10 (spec Part 55) — MCP via the Unified Tool Registry
 
 **Implemented**

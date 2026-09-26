@@ -7,11 +7,14 @@ import type { AgentEvent, EventKind } from "./types.ts";
  * authority. A crash mid-write loses at most one unterminated line, which is
  * trimmed on the next open so the log stays parseable.
  */
+export type EventListener = (event: AgentEvent) => void;
+
 export class EventLog {
   private readonly path: string;
   private seq = 0;
   private readonly startedAt = Date.now();
   private crashed = false;
+  private readonly listeners = new Set<EventListener>();
   readonly eventsDir: string;
   readonly taskId: string;
 
@@ -24,6 +27,16 @@ export class EventLog {
       // Resume keeps seq monotonic within the same file.
       this.seq = readLines(this.path).length;
     }
+  }
+
+  /**
+   * Subscribe to appends (Part 96: incremental state folding). Listeners fire
+   * after the durable write succeeds, in order. Listener exceptions are
+   * contained — never fail the append. Returns an unsubscribe function.
+   */
+  onAppend(listener: EventListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   get file(): string {
@@ -47,6 +60,14 @@ export class EventLog {
         }
       }
       throw err;
+    }
+    // Durable write succeeded — notify incremental-state listeners.
+    for (const l of this.listeners) {
+      try {
+        l(event);
+      } catch {
+        /* a broken listener must never fail an append */
+      }
     }
     return event;
   }
