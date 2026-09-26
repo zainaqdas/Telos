@@ -191,8 +191,9 @@ async function chooseProvider(): Promise<ProviderPreset> {
 }
 
 async function askBaseUrl(preset: ProviderPreset, defaultUrl: string): Promise<string> {
+  const shown = defaultUrl === "" ? "e.g. https://your-gateway.example.com/v1" : defaultUrl;
   for (;;) {
-    const raw = await readInput(`API endpoint URL [${defaultUrl}]: `);
+    const raw = await readInput(`API endpoint URL [${shown}]: `);
     const url = raw === "" ? defaultUrl : raw;
     if (/^https?:\/\//.test(url)) return url.replace(/\/+$/, "");
     console.log("  URL must start with http:// or https://");
@@ -219,9 +220,11 @@ async function askModel(preset: ProviderPreset): Promise<string> {
 
 /**
  * Ask "use the default endpoint?" for preset providers; answering no lets the
- * user point the provider id at a compatible endpoint.
+ * user point the provider id at a compatible endpoint. Presets with no
+ * default (custom endpoint) skip the question — there is nothing to accept.
  */
 async function maybeCustomEndpoint(preset: ProviderPreset): Promise<boolean> {
+  if (preset.requiresBaseUrl) return false;
   const raw = (await readInput(`Use ${preset.label}'s default endpoint (${preset.baseUrl})? [Y/n]: `)).trim().toLowerCase();
   return raw === "" || raw === "y" || raw === "yes";
 }
