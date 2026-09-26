@@ -70,15 +70,22 @@ export function parseToml(text: string): TomlTable {
       current = root;
       for (const part of section[1]!.split(".")) {
         const next = current[part];
-        if (next !== undefined && (typeof next !== "object" || Array.isArray(next))) {
-          throw new Error(`config line ${lineNo}: [${section[1]}] conflicts with earlier value`);
-        }
         if (next === undefined) {
           const fresh: TomlTable = {};
           current[part] = fresh;
           current = fresh;
-        } else {
+        } else if (Array.isArray(next)) {
+          // TOML: [a.b.c] where `b` is an array-of-tables targets the LAST
+          // element (e.g. [mcp.servers.env] after [[mcp.servers]]).
+          const last = next[next.length - 1];
+          if (typeof last !== "object" || last === null || Array.isArray(last)) {
+            throw new Error(`config line ${lineNo}: [${section[1]}] conflicts with earlier value`);
+          }
+          current = last as TomlTable;
+        } else if (typeof next === "object") {
           current = next as TomlTable;
+        } else {
+          throw new Error(`config line ${lineNo}: [${section[1]}] conflicts with earlier value`);
         }
       }
       continue;

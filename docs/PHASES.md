@@ -1,5 +1,21 @@
 # Synergon — Phase Reports
 
+## Phase 10 (spec Part 55) — MCP via the Unified Tool Registry
+
+**Implemented**
+
+- **MCP stdio client** (`src/mcp/client.ts`): JSON-RPC 2.0 over a child process's stdio — the standard MCP local transport — with zero dependencies. Lifecycle: spawn → `initialize` handshake → `initialized` notification → `tools/list` → `tools/call` → stop. Every request is timeout-guarded; a server that dies rejects all in-flight calls (never hangs), and `stop()` SIGTERMs with a SIGKILL backstop. Newline-delimited framing with tolerance for stdout log noise.
+- **Config** (`[[mcp.servers]]`): name (validated, unique), command (single line), args, optional env table (string→string), `timeout_seconds` (1..600, default 30), optional `worker_roles`. Errors are reported per-server as startup notices, never crashes. Policy stays user-owned exactly like external tools.
+- **Registry compilation** (`src/mcp/tools.ts`): each MCP tool becomes a standard `ToolDefinition` named `mcp_<server>_<tool>` (sanitized, collision-impossible, never shadows existing tools) — same schema validation, repetition guard, budgets, and transcript treatment as builtins; **no MCP-specific logic anywhere in the Manager** (Part 55's core requirement). Calls that fail (server down, `isError`, timeout) return failed ToolResults — one bad server degrades, the session doesn't. Tools close over the live client; registrations return it for shutdown tracking.
+- **Worker access**: `worker_roles` on a server lets those roles call its tools through the same scoped-registry path as external tools; default is manager-only.
+- **Session wiring**: servers start once at session boot (notices `⚙ mcp server 'x': N tool(s)` or `unavailable: …`), and `closeMcpClients` runs in shutdown — MCP servers die with the session (same discipline as shell children and the browser).
+
+**Tested** — 8 new tests in `test/mcp.test.ts` against a **real MCP server subprocess** (not a mock client): config parsing (valid/duplicate/bad-name/env-type/timeout-bounds/roles-validation/absent-section), handshake+list+call round-trip, registry compilation (prefixing, schema enforcement through `validateToolArgs`, `isError` → failed ToolResult), crash-at-start reported as failed registration, hung-call timeout enforcement (700ms deadline honored, not the 30s default), worker-role visibility. Plus a TOML regression: `[a.b]` after `[[a]]` targets the **last** array entry (this was a real parser gap — see below). A full-session E2E (mock provider + real MCP subprocess + real config.toml) verified the complete Part 55 path: tool advertised in the tools list → `mcp_files_read_file` tool_call dispatched → result round-tripped into the model transcript → tool-call budget incremented → clean shutdown.
+
+**Failed / learned** — the first test run **hung the whole suite**: the registry test never stopped its client, so a live subprocess kept the node:test process alive (try-block `const`s also proved invisible to `finally`, hiding the client reference). Both fixed in the test; the product's own timeout/exit paths were already sound. The env-table test then exposed a **real TOML parser gap**: `[mcp.servers.env]` threw "conflicts with earlier value" because the `[section]` branch rejected intermediate arrays — TOML requires it to attach to the last `[[mcp.servers]]` entry. Fixed in `src/config/toml.ts` (mirrors the Phase 8 array-section fix) and locked with a regression test. Finally, an E2E lesson: MCP children snapshot `process.env` at spawn, so runtime `process.env` changes are invisible to already-running servers — test tooling must bake flags in at spawn time.
+
+**Remaining** — spec Phase 11 / Part 96 optimization (gate re-reduction caching, retrieval/prompt tuning, `/compact` integration with workers), MCP resources/prompts (tools only for now, matching Part 55's scope), SSE/HTTP MCP transports for remote servers.
+
 ## Phase 11 (spec Phase 9) — BYOK + Additional Providers + Cost Accounting
 
 **Implemented**

@@ -9,6 +9,10 @@ import { registerFilesystemTools } from "../tools/fs-tools.ts";
 import { registerShellTools } from "../tools/shell-tools.ts";
 import { registerWebTools } from "../tools/web.ts";
 import { registerBrowserTools, closeBrowserSession } from "../tools/browser.ts";
+import { parseMcpServers } from "../mcp/config.ts";
+import { parseToml } from "../config/toml.ts";
+import { registerMcpServer, closeMcpClients } from "../mcp/tools.ts";
+import { McpClient } from "../mcp/client.ts";
 import { makeContext, installSecret } from "../tools/util.ts";
 import { BudgetEnforcer, type BudgetLimits } from "../runtime/usage.ts";
 import { CancellationController } from "../runtime/cancellation.ts";
@@ -144,6 +148,26 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   const journal = new EditJournal();
   journalWriteTools(registry, journal);
 
+  // MCP servers (Part 55): user-declared local stdio servers compiled into
+  // the same registry. A server that fails to start is a notice, not a crash.
+  const mcpClients: McpClient[] = [];
+  try {
+    const mcpRoot = parseToml(readFileSync(join(opts.projectRoot, STATE_DIRNAME, "config.toml"), "utf8")) as Parameters<typeof parseMcpServers>[0];
+    const mcpParsed = parseMcpServers(mcpRoot);
+    for (const e of mcpParsed.errors) out(`  ⚙ mcp config error: ${e}`);
+    for (const spec of mcpParsed.specs) {
+      const reg = await registerMcpServer(registry, spec);
+      if (reg.started && reg.client) {
+        out(`  ⚙ mcp server '${reg.serverName}': ${reg.tools.length} tool(s)${reg.tools.length ? ` (${reg.tools.join(", ")})` : ""}`);
+        mcpClients.push(reg.client);
+      } else {
+        out(`  ⚙ mcp server '${reg.serverName}' unavailable: ${reg.error}`);
+      }
+    }
+  } catch {
+    /* no/!parsable config for MCP: skip silently (config errors surface elsewhere) */
+  }
+
   const manager = new ManagerLoop({
     provider,
     model: config.model.name,
@@ -237,6 +261,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     if (isRawSupported) stdin.setRawMode(false);
     stdin.removeListener("data", onKeypress);
     void closeBrowserSession(); // no orphaned browser (same discipline as shell children)
+    closeMcpClients(mcpClients); // MCP servers die with the session
     cancellation.cancel("session shutdown");
     // Only record cancellation if the task did not already complete —
     // a completed task must not also be marked cancelled in the log.

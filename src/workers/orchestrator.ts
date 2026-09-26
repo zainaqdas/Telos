@@ -4,6 +4,7 @@ import type { BudgetEnforcer } from "../runtime/usage.ts";
 import type { EventLog } from "../events/log.ts";
 import { ROLES, parseWorkerReport, formatReportForManager, emptyReport, evaluateObjection, type WorkerRole, type WorkerReport } from "./roles.ts";
 import { workerExternalTools } from "../tools/external.ts";
+import { mcpWorkerTools } from "../mcp/tools.ts";
 import { ManagerLoop } from "../manager/loop.ts";
 import type { Provider } from "../providers/types.ts";
 import type { ToolExecContext } from "../tools/registry.ts";
@@ -606,6 +607,11 @@ export class Orchestrator {
       if (tool) view.register(tool);
     }
     for (const name of workerExternalTools(this.deps.registry, role)) {
+      const tool = this.deps.registry.get(name);
+      if (tool) view.register(tool);
+    }
+    // MCP tools (Part 55) follow the same policy: only roles the user named.
+    for (const name of mcpWorkerTools(this.deps.registry, role)) {
       const tool = this.deps.registry.get(name);
       if (tool) view.register(tool);
     }

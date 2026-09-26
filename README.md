@@ -97,6 +97,15 @@ confirm_destructive = true
 # key = "env"
 # type = "string"
 # required = true
+
+# [[mcp.servers]]                # MCP stdio servers (JSON-RPC 2.0, zero deps)
+# name = "files"                 # tools exposed as mcp_<server>_<tool>
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+# timeout_seconds = 30           # per-request timeout (1..600)
+# worker_roles = ["explorer"]    # optional; worker roles allowed to call (default manager-only)
+# [mcp.servers.env]              # optional extra environment
+# NODE_ENV = "production"
 ```
 
 API keys are read from the environment only — never written to prompts, logs, event history, or Git.
