@@ -10,10 +10,26 @@
   },
   "homepage": "https://github.com/zainaqdas/Telos#readme",
   "bugs": "https://github.com/zainaqdas/Telos/issues",
-  "keywords": ["ai", "agent", "coding", "cli", "terminal", "agentic", "coding-agent"],
-  "bin": { "telos": "./bin/telos.js" },
-  "files": ["bin/", "src/", "README.md"],
-  "engines": { "node": ">=22.18" },
+  "keywords": [
+    "ai",
+    "agent",
+    "coding",
+    "cli",
+    "terminal",
+    "agentic",
+    "coding-agent"
+  ],
+  "bin": {
+    "telos": "bin/telos.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "start": "node src/index.ts",
     "typecheck": "tsc --noEmit",
