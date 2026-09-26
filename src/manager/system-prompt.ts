@@ -29,6 +29,7 @@ export function buildSystemPrompt(config: TelosConfig, repoProfile?: string): st
     "- edit_file replaces an EXACT old_string. Include enough surrounding lines to be unambiguous.",
     "- run_shell output includes the exit code. Non-zero exits are failures — read the error.",
     "- Keep commands short and specific. Prefer npm test over long chained commands.",
+    "- WRITE LARGE FILES IN CHUNKS. Providers cap output tokens per response; one giant write_file argument can be cut off mid-JSON. For files over ~150 lines: write_file the first chunk (ending at a clean line), then append_file each following chunk in order. Keep every tool call comfortably small.",
     "",
     "COLLABORATION",
     "- Worker reports can carry PROPOSAL (a recommended plan/change) and BLOCKER (something they cannot resolve). Proposals are advisory input for you; blockers stay visible until a recorded decision clears them.",

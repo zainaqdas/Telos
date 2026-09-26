@@ -1,6 +1,6 @@
 {
   "name": "@zainaqdas/telos",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Terminal-native agentic coding CLI: persistent manager, evidence-based completion gate, hard runtime budgets. Command: telos.",
   "type": "module",
   "license": "MIT",

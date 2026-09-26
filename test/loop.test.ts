@@ -232,3 +232,32 @@ test("tool args with raw newlines inside JSON strings are repaired once, not ref
   assert.ok(!out.output.includes("not valid JSON"), `unexpected refusal: ${out.output}`);
   assert.equal(calls.length, 1);
 });
+
+test("truncated tool-call args (finish_reason=length) produce chunked-write guidance", async () => {
+  const { ManagerLoop } = await import("../src/manager/loop.ts");
+  const loop = Object.create(ManagerLoop.prototype) as unknown as {
+    deps: Record<string, unknown>; guard: unknown; satisfySkillRequirements: unknown; scanRejections: unknown;
+    executeTool: (c: { name: string; argumentsJson: string }) => Promise<{ output: string }>;
+  };
+  loop.deps = {
+    registry: { get: (_n: string) => ({ name: "write_file", parameters: { type: "object", properties: {}, required: [] } }), names: () => ["write_file"] },
+    events: { append: () => {}, readAll: () => [] },
+    cancellation: { isCancelled: false, signal: undefined },
+    ctx: { root: "/tmp", signal: undefined },
+    budget: { check: () => ({ allowed: true }), record: () => {} },
+    config: { runtime: {} },
+  };
+  loop.guard = { evaluate: () => ({ verdict: "ALLOW", reason: "" }), recordNonStorm: () => {}, record: () => {} };
+  loop.deps["skillRouter"] = { route: () => [], activate: () => {} };
+  loop.satisfySkillRequirements = () => {};
+  loop.scanRejections = async () => null;
+  (loop as unknown as { lastStopReason: string }).lastStopReason = "length";
+  const out = await loop.executeTool({
+    name: "write_file",
+    // Unterminated JSON: the output cap cut the completion mid-argument.
+    argumentsJson: '{"path": "index.html", "content": "<!DOCTYPE html>\\n<html>\\n<',
+  });
+  assert.ok(out.output.includes("truncated"), `expected truncation notice: ${out.output}`);
+  assert.ok(out.output.includes("append_file"), `expected chunked-write strategy: ${out.output}`);
+  assert.ok(out.output.includes("index.html"), "expected the path hint from partial args");
+});

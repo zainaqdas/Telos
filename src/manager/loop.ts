@@ -85,6 +85,8 @@ export class ManagerLoop {
   private turnStartedAt = 0;
   private busy = false;
   private streamRetries = 0;
+  /** finish_reason of the most recent model turn ("length" ⇒ output cap hit). */
+  private lastStopReason = "";
   private readonly isWorker: boolean;
   private readonly rejectionHits = new Set<string>();
 
@@ -289,7 +291,7 @@ export class ManagerLoop {
         }
       }
       if (text) assistantText = text;
-      void stopReason;
+      this.lastStopReason = stopReason;
 
       if (toolCalls.length === 0) {
         // Model finished its turn with prose — the Gate decides what happens.
@@ -326,7 +328,7 @@ export class ManagerLoop {
     }
   }
 
-  // ─── Tool execution with repetition guard interception ──────────────────────
+  // ─── Tool execution with repetition guard interception ───────────────────
 
   private async executeTool(call: PendingToolCall): Promise<{ output: string }> {
     const tool = this.deps.registry.get(call.name);
@@ -342,6 +344,18 @@ export class ManagerLoop {
       try {
         args = JSON.parse(call.argumentsJson.replace(/\r?\n/g, "\\n")) as Record<string, unknown>;
       } catch {
+        // Distinguish a truncated completion (output cap hit mid-call) from
+        // generic malformed JSON: the recovery strategies are different.
+        const argsLen = call.argumentsJson.length;
+        if (this.lastStopReason === "length") {
+          const strategy =
+            call.name === "write_file" || call.name === "append_file"
+              ? `Your tool-call arguments were cut off because the response hit the provider's output-token limit BEFORE the JSON could close. The file is too large for one tool call. Strategy: (1) if a partial ${call.name} for "${truncPathHint(call.argumentsJson)}" already succeeded earlier, use append_file with the NEXT CHUNK (a few hundred lines max); if not, use write_file with ONLY the first ~150 lines of the file, then append_file the rest in order, one chunk per call. Never put the whole file in one argument again.`
+              : "Your tool-call arguments were cut off by the provider's output-token limit. Make the call smaller: fewer/smaller arguments, or split the work across several smaller calls.";
+          return {
+            output: `tool ${call.name}: arguments truncated by the provider output limit (unterminated JSON, ${argsLen} chars received). ${strategy}`,
+          };
+        }
         return { output: `tool ${call.name}: arguments are not valid JSON: ${call.argumentsJson.slice(0, 200)}` };
       }
     }
@@ -643,4 +657,10 @@ function summarizeArgs(args: Record<string, unknown>): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Best-effort path hint from truncated write/append args (for error messages). */
+function truncPathHint(argsJson: string): string {
+  const m = /"path"\s*:\s*"([^"\\]{0,120})/.exec(argsJson);
+  return m?.[1] ?? "the target file";
 }

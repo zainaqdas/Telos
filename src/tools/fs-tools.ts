@@ -93,6 +93,39 @@ export function registerFilesystemTools(registry: ToolRegistry): void {
   });
 
   registry.register({
+    name: "append_file",
+    description:
+      "Append text to the end of a file (created if missing) in the workspace. Use for chunked writing when a file is too long for one write_file call: write_file the first chunk, then append_file the rest in order.",
+    permission: "write",
+    mutative: true,
+    risk: "medium",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        content: { type: "string" },
+      },
+      required: ["path", "content"],
+      additionalProperties: false,
+    },
+    async execute(args, ctx) {
+      try {
+        const p = safePath(ctx, String(args["path"] ?? ""));
+        const before = await readFile(p, "utf8").catch(() => "");
+        await mkdir(dirname(p), { recursive: true });
+        const addition = String(args["content"] ?? "");
+        await writeFile(p, before + addition, "utf8");
+        return ok(
+          `appended ${addition.length} bytes to ${relative(ctx.root, p)} (file now ${before.length + addition.length} bytes)`,
+          { path: relative(ctx.root, p), appendedBytes: addition.length, totalBytes: before.length + addition.length },
+        );
+      } catch (err) {
+        return fail(`append_file failed: ${(err as Error).message}`, "io_error");
+      }
+    },
+  });
+
+  registry.register({
     name: "edit_file",
     description: "Replace an exact string in a file. Fails if old_string is not found or is ambiguous; use count to allow multiple replacements.",
     permission: "write",
