@@ -83,3 +83,56 @@ test("provider errors surface HTTP status and retryability", async () => {
     },
   );
 });
+
+test("SSE final data line without trailing newline is not dropped (tail flush)", async () => {
+  // Regression: servers that end the body without a newline lost their last
+  // data line — the classic truncated-tool-arguments failure.
+  const sse =
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","function":{"name":"write_file","arguments":"{\\"path\\": \\"s.html\\", \\"content\\": \\"<html>"}}]}}]}\n' +
+    'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n' +
+    'data: {"usage":{"prompt_tokens":5,"completion_tokens":9,"total_tokens":14}}'; // no trailing \n
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(sse);
+    },
+    async (url) => {
+      const p = new OpenAICompatibleProvider("k", url);
+      const chunks = [];
+      for await (const c of p.stream({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }, "m")) {
+        chunks.push(c);
+      }
+      const usage = chunks.find((c) => c.type === "usage")?.usage;
+      assert.ok(usage, "final usage line without trailing newline must be parsed");
+      assert.equal(usage?.totalTokens, 14);
+      assert.ok(chunks.some((c) => c.type === "finish" && c.stopReason === "tool_calls"));
+    },
+  );
+});
+
+test("reasoning_content deltas surface as thinking_delta chunks", async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"reasoning_content":"Let me think step by step"}}]}',
+    'data: {"choices":[{"delta":{"reasoning_content":" about the layout."}}]}',
+    'data: {"choices":[{"delta":{"content":"Here is the plan."}}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    "data: [DONE]",
+  ].join("\n\n") + "\n\n";
+  await withServer(
+    (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(sse);
+    },
+    async (url) => {
+      const p = new OpenAICompatibleProvider("k", url);
+      const chunks = [];
+      for await (const c of p.stream({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }, "m")) {
+        chunks.push(c);
+      }
+      const thinking = chunks.filter((c) => c.type === "thinking_delta").map((c) => c.text).join("");
+      assert.equal(thinking, "Let me think step by step about the layout.");
+      const text = chunks.filter((c) => c.type === "text_delta").map((c) => c.text).join("");
+      assert.equal(text, "Here is the plan.");
+    },
+  );
+});

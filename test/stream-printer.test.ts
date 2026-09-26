@@ -59,3 +59,43 @@ test("streamWidth honors COLUMNS env and clamps to a floor", () => {
   assert.equal(streamWidth({}, {}), 100);
   assert.equal(streamWidth({ columns: 5 }, {}), 20);
 });
+
+test("thinking renders dim; answer text flushes the dim block first", () => {
+  const chunks: string[] = [];
+  const p = new StreamPrinter({ width: Number.POSITIVE_INFINITY, write: (s) => chunks.push(s) });
+  p.thinking("reasoning about the bug ");
+  p.push("The answer.");
+  p.end();
+  const text = chunks.join("");
+  // Dim marker appears before thinking, reset appears before the answer.
+  const dimIdx = text.indexOf("\x1b[2m");
+  const resetIdx = text.indexOf("\x1b[22m");
+  const answerIdx = text.indexOf("The answer.");
+  assert.ok(dimIdx !== -1, "thinking block must be dimmed");
+  assert.ok(resetIdx !== -1 && resetIdx < answerIdx, "reset must precede answer text");
+  assert.ok(text.includes("reasoning about the bug"));
+});
+
+test("thinking-only stream still resets the dim block at end()", () => {
+  const chunks: string[] = [];
+  const p = new StreamPrinter({ width: Number.POSITIVE_INFINITY, write: (s) => chunks.push(s) });
+  p.thinking("hmm");
+  p.end();
+  const text = chunks.join("");
+  assert.ok(text.includes("\x1b[2m"));
+  assert.ok(text.endsWith("\x1b[22m"), `got: ${JSON.stringify(text)}`);
+});
+
+test("tool line between thinking and answer does not inherit dim state", () => {
+  const chunks: string[] = [];
+  const p = new StreamPrinter({ width: Number.POSITIVE_INFINITY, write: (s) => chunks.push(s) });
+  p.thinking("thinking... ");
+  p.newline(); // interleaved status line
+  p.push("status line\n");
+  p.push("answer");
+  p.end();
+  const text = chunks.join("");
+  const afterStatus = text.slice(text.indexOf("status line"));
+  // Answer text comes after the reset (dim block closed before it).
+  assert.ok(afterStatus.indexOf("\x1b[22m") < afterStatus.indexOf("answer"));
+});

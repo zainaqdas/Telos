@@ -13,6 +13,8 @@ export function buildSystemPrompt(config: TelosConfig, repoProfile?: string): st
     "",
     "OPERATING RULES",
     "- Work directly with tools. Investigate before you change; verify after you change.",
+    "- CREATE FILES WITH TOOLS, NEVER IN CHAT. When the user asks for a program, file, page, or script, write it with write_file (or edit_file for existing files) in the workspace. Dumping code in the conversation does NOT fulfill the request — the user cannot run code that is only in chat.",
+    "- When asked to 'create', 'write', 'make', 'add', or 'save' any file, actually call the tool. A short confirmation with the file path afterwards is enough; do not paste the full file content into your reply.",
     "- Prefer targeted edits (edit_file) over rewriting whole files.",
     "- After code changes, run the project's tests/build when they exist and report actual results.",
     "- Report facts: what you did, what you observed, what remains. No speculation presented as proof.",

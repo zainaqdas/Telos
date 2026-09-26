@@ -104,6 +104,15 @@ export class OpenAICompatibleProvider implements Provider {
         const choice = choices[0];
         if (choice) {
           const delta = (choice["delta"] ?? {}) as Record<string, unknown>;
+          // Reasoning models (DeepSeek thinking mode, vLLM reasoning outputs,
+          // and other OpenAI-compatible providers) stream their chain of
+          // thought on a separate field, sibling of `content`. Surfaces it so
+          // the terminal shows progress instead of appearing hung while the
+          // model thinks.
+          const reasoning = delta["reasoning_content"];
+          if (typeof reasoning === "string" && reasoning.length > 0) {
+            yield { type: "thinking_delta", text: reasoning };
+          }
           const content = delta["content"];
           if (typeof content === "string" && content.length > 0) {
             yield { type: "text_delta", text: content };
@@ -229,7 +238,15 @@ async function* sseEvents(body: ReadableStream<Uint8Array>, signal?: AbortSignal
         throw new ProviderError("aborted", undefined, false);
       }
       const { done, value } = result;
-      if (done) break;
+      if (done) {
+        // Flush a final event not terminated by a newline — servers that end
+        // the body without it would otherwise have their last data line
+        // silently dropped (the classic truncated-tool-arguments bug).
+        buffer += decoder.decode();
+        const tail = buffer.replace(/\r$/, "");
+        if (tail.startsWith("data:")) yield tail.slice(5).trim();
+        break;
+      }
       buffer += decoder.decode(value, { stream: true });
       let nl: number;
       while ((nl = buffer.indexOf("\n")) !== -1) {

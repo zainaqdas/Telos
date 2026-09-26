@@ -46,7 +46,7 @@ export interface Message {
 }
 
 export interface StreamChunk {
-  type: "text_delta" | "tool_call_delta" | "finish" | "usage";
+  type: "text_delta" | "tool_call_delta" | "finish" | "usage" | "thinking_delta";
   text?: string;
   toolCall?: ToolCall;
   usage?: Usage;

@@ -244,7 +244,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       if (byte === 0x0d || byte === 0x0a) {
         const line = lineBuffer;
         lineBuffer = "";
-        out("");
+        out("\n"); // drop to a fresh line: the response must never jam onto the prompt
         void handleLine(line);
         return;
       }
@@ -412,6 +412,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         isCorrection,
         images: images.map((i) => ({ mediaType: i.mediaType, data: i.data })),
         onText: (delta) => printer.push(delta),
+        onThinking: (delta) => printer.thinking(delta),
         onTool: (name, summary) => {
           printer.newline();
           out(`  ⚙ ${name}  ${summary}`);

@@ -145,7 +145,7 @@ export function parseConfig(root: Record<string, unknown>): TelosConfig {
       baseUrl: expectString(model["base_url"], "model.base_url", { fallback: "" }),
       apiKeyEnv: expectEnvVarName(model["api_key_env"], "model.api_key_env", { fallback: "TELOS_API_KEY" }),
       temperature: expectInt(model["temperature"], "model.temperature", { min: 0, max: 2, fallback: 0 }),
-      maxTokens: expectInt(model["max_tokens"], "model.max_tokens", { min: 256, fallback: 16384 }),
+      maxTokens: expectInt(model["max_tokens"], "model.max_tokens", { min: 256, fallback: 32_768 }),
       ...parsePricing(model),
       workerModel: expectString(model["worker_model"], "model.worker_model", { optional: true }),
     },

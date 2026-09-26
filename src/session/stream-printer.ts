@@ -10,23 +10,50 @@
  *   - non-TTY: greedy word-boundary wrapping at the terminal width, so piped
  *     or logged output reads like the interactive session.
  *
- * Interleaved lines (tool activity, status) call newline() first so they
- * never split a word that is still being streamed.
+ * Reasoning deltas (thinking) render dimmed so users see progress while a
+ * reasoning model works; answer text always flushes the thinking block first
+ * so the two never mix mid-line. Interleaved lines (tool activity, status)
+ * call newline() first so they never split a word still being streamed.
  */
 export class StreamPrinter {
   private lineLen = 0;
   private word = "";
   private pendingSpace = 0;
+  private thinkingMode = false;
   private readonly width: number;
   private readonly write: (s: string) => void;
+
+  /** Dim = faint, without inheriting the terminal's bold state (unlike \\x1b[2m…\\x1b[0m). */
+  private readonly DIM = "\x1b[2m";
+  private readonly RESET = "\x1b[22m";
 
   constructor(opts: { width: number; write?: (s: string) => void }) {
     this.width = opts.width;
     this.write = opts.write ?? ((s: string) => process.stdout.write(s));
   }
 
-  /** Feed one streamed text delta. */
+  /** Feed one streamed reasoning delta (rendered dim, distinct from answer text). */
+  thinking(delta: string): void {
+    if (!this.thinkingMode) {
+      this.thinkingMode = true;
+      this.newline();
+      this.write(this.DIM);
+    }
+    this.pushText(delta);
+  }
+
+  /** Feed one streamed answer-text delta. */
   push(delta: string): void {
+    if (this.thinkingMode) {
+      // Flush the dim block before answer text begins.
+      this.newline();
+      this.write(this.RESET);
+      this.thinkingMode = false;
+    }
+    this.pushText(delta);
+  }
+
+  private pushText(delta: string): void {
     if (!Number.isFinite(this.width)) {
       this.write(delta);
       return;
@@ -62,6 +89,11 @@ export class StreamPrinter {
 
   /** Flush any pending streamed text at the end of a run (no trailing newline). */
   end(): void {
+    if (this.thinkingMode) {
+      this.newline();
+      this.write(this.RESET);
+      this.thinkingMode = false;
+    }
     if (!Number.isFinite(this.width)) return;
     this.flushWord();
     this.dropSpace();

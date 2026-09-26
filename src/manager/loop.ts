@@ -56,6 +56,8 @@ export interface RunOptions {
   images?: Array<{ mediaType: string; data: string }>;
   /** Live UI hooks (streaming deltas, tool activity). */
   onText?: (delta: string) => void;
+  /** Live chain-of-thought deltas (reasoning_content on OpenAI-compatible providers). */
+  onThinking?: (delta: string) => void;
   onTool?: (name: string, argsSummary: string) => void;
 }
 
@@ -234,7 +236,10 @@ export class ManagerLoop {
       const toolCalls: PendingToolCall[] = [];
       try {
         const stream = this.deps.provider.stream(
-          { messages: this.messages, tools: this.deps.registry.specs(), signal: this.deps.cancellation.signal },
+          // max_tokens headroom: file writes arrive as one tool-call argument;
+          // a tight cap truncates the JSON mid-string (the model's args become
+          // unsalvageable). The per-task token budget still enforces cost.
+          { messages: this.messages, tools: this.deps.registry.specs(), signal: this.deps.cancellation.signal, maxTokens: this.deps.config.model.maxTokens },
           this.deps.model,
         );
         for await (const chunk of stream) {
@@ -245,6 +250,8 @@ export class ManagerLoop {
             // stop means stop, but state is preserved).
             assistantText = text;
             opts.onText?.(chunk.text);
+          } else if (chunk.type === "thinking_delta" && chunk.text) {
+            opts.onThinking?.(chunk.text);
           } else if (chunk.type === "tool_call_delta" && chunk.toolCall) toolCalls.push(chunk.toolCall);
           else if (chunk.type === "usage" && chunk.usage) turnUsage = chunk.usage;
           else if (chunk.type === "finish") stopReason = chunk.stopReason ?? "";
@@ -329,7 +336,14 @@ export class ManagerLoop {
     try {
       args = call.argumentsJson.trim() ? (JSON.parse(call.argumentsJson) as Record<string, unknown>) : {};
     } catch {
-      return { output: `tool ${call.name}: arguments are not valid JSON: ${call.argumentsJson.slice(0, 200)}` };
+      // Some OpenAI-compatible models (notably DeepSeek-family chat models)
+      // emit literal newlines inside JSON string values, which is invalid
+      // JSON but has an unambiguous repair: escape them and retry once.
+      try {
+        args = JSON.parse(call.argumentsJson.replace(/\r?\n/g, "\\n")) as Record<string, unknown>;
+      } catch {
+        return { output: `tool ${call.name}: arguments are not valid JSON: ${call.argumentsJson.slice(0, 200)}` };
+      }
     }
 
     // ── Repetition Guard: classify BEFORE executing (Part 26) ──

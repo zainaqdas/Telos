@@ -208,3 +208,27 @@ test("token usage from the provider counts against the token budget", async () =
     cleanup(h);
   }
 });
+
+test("tool args with raw newlines inside JSON strings are repaired once, not refused", async () => {
+  // DeepSeek-family models sometimes emit literal newlines inside JSON string
+  // values — invalid JSON, but unambiguously repairable.
+  const { ManagerLoop } = await import("../src/manager/loop.ts");
+  const calls: Array<{ args: string }> = [];
+  const fakeRegistry = {
+    get: (_n: string) => ({ name: "write_file", description: "w", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] }, execute: async (a: Record<string, unknown>) => { calls.push({ args: JSON.stringify(a) }); return { ok: true, output: `wrote ${String(a["path"])}` }; } }),
+    names: () => ["write_file"],
+    specs: () => [],
+  };
+  const loop = Object.create(ManagerLoop.prototype) as unknown as { deps: Record<string, unknown>; guard: unknown; satisfySkillRequirements: unknown; scanRejections: unknown; executeTool: (c: { name: string; argumentsJson: string }) => Promise<{ output: string }> };
+  loop.deps = { registry: fakeRegistry, events: { append: () => {}, readAll: () => [] }, cancellation: { isCancelled: false, signal: undefined }, ctx: { root: "/tmp", signal: undefined }, budget: { check: () => ({ allowed: true }), record: () => {} }, config: { runtime: {} } };
+  loop.guard = { evaluate: () => ({ verdict: "ALLOW", reason: "" }), recordNonStorm: () => {}, record: () => {} };
+  loop.deps["skillRouter"] = { route: () => [], activate: () => {} };
+  loop.satisfySkillRequirements = () => {};
+  loop.scanRejections = async () => null;
+  const out = await loop.executeTool({
+    name: "write_file",
+    argumentsJson: '{"path": "s.html", "content": "<html>\\n<body>\\nhi\\n</body>\\n</html>"}',
+  });
+  assert.ok(!out.output.includes("not valid JSON"), `unexpected refusal: ${out.output}`);
+  assert.equal(calls.length, 1);
+});
