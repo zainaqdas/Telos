@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -44,6 +44,11 @@ test("e2e: chat session completes a read-only instruction via mock provider", as
 
   const dir = mkdtempSync(join(tmpdir(), "syn-e2e-"));
   writeFileSync(join(dir, "sample.txt"), "hello world\n", "utf8");
+  // TELOS_MODEL is set below, but a project config.toml must also exist —
+  // bare `telos` in an unconfigured directory now scaffolds config and exits
+  // (first-run UX), which would hang this test instead of starting a session.
+  mkdirSync(join(dir, ".project-agent"), { recursive: true });
+  writeFileSync(join(dir, ".project-agent", "config.toml"), "[model]\nname = \"\"\n", "utf8");
 
   const child: ChildProcess = spawn(process.execPath, [join(process.cwd(), "src", "index.ts"), "chat"], {
     cwd: dir,
