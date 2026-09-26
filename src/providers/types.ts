@@ -88,13 +88,35 @@ export interface Provider {
 export class ProviderError extends Error {
   readonly status?: number;
   readonly retryable: boolean;
+  /** Hint in milliseconds from the provider's retry-after / retry-after-ms header (Retry v2). */
+  readonly retryAfterMs?: number;
 
-  constructor(message: string, status?: number, retryable = false) {
+  constructor(message: string, status?: number, retryable = false, retryAfterMs?: number) {
     super(message);
     this.name = "ProviderError";
     this.status = status;
     this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * Retry v2 backoff (Scale Batch 4): exponential (500ms × 2^attempt) with
+ * ±25% jitter so parallel workers don't retry in lockstep. A provider-provided
+ * retry-after hint replaces the computed delay outright.
+ */
+export function retryDelayMs(attempt: number, retryAfterMs?: number): number {
+  if (typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+    return Math.min(retryAfterMs, 60_000);
+  }
+  const base = 500 * 2 ** attempt;
+  const jitter = base * 0.25;
+  return Math.round(base + (Math.random() * 2 - 1) * jitter);
+}
+
+/** Human delay for the "retrying in Xs" line. */
+export function formatRetryDelay(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 
 export function emptyUsage(): Usage {

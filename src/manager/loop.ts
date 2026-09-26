@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Provider, Message, Usage } from "../providers/types.ts";
-import { ProviderError, emptyUsage, addUsage } from "../providers/types.ts";
+import { ProviderError, emptyUsage, addUsage, retryDelayMs, formatRetryDelay } from "../providers/types.ts";
 import type { ToolRegistry, ToolExecContext } from "../tools/registry.ts";
 import { validateToolArgs } from "../tools/registry.ts";
 import type { BudgetEnforcer } from "../runtime/usage.ts";
@@ -55,6 +55,13 @@ export interface ManagerDeps {
   /** Observed output-cap learning (Scale Batch 2): called when a completion
    *  returns truncated so the session can adjust compaction/budget math. */
   onObservedOutputCap?: (outputTokens: number) => void;
+  /**
+   * Mid-turn steering (Scale Batch 4, Pi's getSteeringMessages pattern): the
+   * loop polls this at every tool-call boundary; returned lines join the
+   * transcript as user messages BEFORE the next model turn, so a queued
+   * correction steers the very next step instead of waiting for run end.
+   */
+  steering?: { drain: () => string[] };
 }
 
 export interface RunOptions {
@@ -270,11 +277,22 @@ export class ManagerLoop {
           return this.finish("cancelled", assistantText);
         }
         if (err instanceof ProviderError && err.retryable) {
-          // Bounded recovery (Part 86): retryable stream/HTTP failures retry
-          // up to maxStreamAttempts with backoff, then fail cleanly.
+          // Retry v2 (Scale Batch 4): up to maxStreamAttempts retries with
+          // exponential backoff (±25% jitter) that honors the provider's
+          // retry-after hint; every wait is visible and event-logged.
           if (this.streamRetries < this.deps.config.runtime.maxStreamAttempts) {
             this.streamRetries += 1;
-            await sleep(500 * this.streamRetries);
+            const delay = retryDelayMs(this.streamRetries - 1, err.retryAfterMs);
+            const reason = err.status === 429 ? "rate limit" : err.status ? `HTTP ${err.status}` : "retryable provider error";
+            const notice = `provider retrying in ${formatRetryDelay(delay)} (${reason}; attempt ${this.streamRetries}/${this.deps.config.runtime.maxStreamAttempts})`;
+            try {
+              this.deps.onNotice?.(notice);
+            } catch {
+              /* observers must never break the run */
+            }
+            this.deps.events.append("task_updated", { notice });
+            await cancellableSleep(delay, this.deps.cancellation.signal);
+            if (this.deps.cancellation.isCancelled) return this.finish("cancelled", assistantText);
             continue;
           }
           const message = `provider failed after ${this.streamRetries} retry attempt(s): ${(err as Error).message}`;
@@ -324,19 +342,76 @@ export class ManagerLoop {
         toolCalls: toolCalls.map((tc) => ({ id: tc.id, name: tc.name, argumentsJson: tc.argumentsJson })),
       });
 
-      for (const call of toolCalls) {
+      // ── Parallel read-only execution (Scale Batch 4, Pi's executionMode
+      // split): a maximal run of CONSECUTIVE read-only calls executes via
+      // Promise.all; any mutation splits the batch and runs alone, strictly
+      // sequentially, so workspace state stays deterministic. Results are
+      // pushed back in call order regardless of completion order.
+      let callIdx = 0;
+      while (callIdx < toolCalls.length) {
         if (this.deps.cancellation.isCancelled) return this.finish("cancelled", assistantText);
 
-        const toolVerdict = this.deps.budget.check("tool_call");
-        if (!toolVerdict.allowed) {
-          this.deps.events.append("budget_exceeded", { resource: toolVerdict.resource, message: toolVerdict.message });
-          this.pushToolResult(call.id, call.name, `BUDGET EXCEEDED: ${toolVerdict.message}. No further tool calls are allowed this task.`);
-          return { ...this.finish("budget_exceeded", assistantText), detail: toolVerdict.message };
+        const batch: PendingToolCall[] = [];
+        while (callIdx < toolCalls.length) {
+          const t = this.deps.registry.get(toolCalls[callIdx]!.name);
+          if (t && !t.mutative) {
+            batch.push(toolCalls[callIdx]!);
+            callIdx += 1;
+          } else break;
+        }
+        if (batch.length === 0) {
+          batch.push(toolCalls[callIdx]!); // mutative — executes alone
+          callIdx += 1;
         }
 
-        const result = await this.executeTool(call);
-        opts.onTool?.(call.name, result.output.split("\n")[0]?.slice(0, 100) ?? "");
-        this.pushToolResult(call.id, call.name, result.output);
+        // Budget pre-flight, in call order. If the budget dies mid-batch,
+        // execute the still-affordable prefix, then refuse the rest — the
+        // observable behavior matches the sequential path exactly.
+        let failAt = -1;
+        let failResource: string | undefined;
+        let failMessage: string | undefined;
+        for (let b = 0; b < batch.length; b += 1) {
+          const toolVerdict = this.deps.budget.check("tool_call");
+          if (!toolVerdict.allowed) {
+            failAt = b;
+            failResource = toolVerdict.resource;
+            failMessage = toolVerdict.message;
+            break;
+          }
+        }
+        if (failAt >= 0) {
+          this.deps.events.append("budget_exceeded", { resource: failResource, message: failMessage });
+          for (let b = 0; b < failAt; b += 1) {
+            const r = await this.executeTool(batch[b]!);
+            opts.onTool?.(batch[b]!.name, r.output.split("\n")[0]?.slice(0, 100) ?? "");
+            this.pushToolResult(batch[b]!.id, batch[b]!.name, r.output);
+          }
+          this.pushToolResult(batch[failAt]!.id, batch[failAt]!.name, `BUDGET EXCEEDED: ${failMessage}. No further tool calls are allowed this task.`);
+          return { ...this.finish("budget_exceeded", assistantText), detail: failMessage };
+        }
+
+        const settled = await Promise.all(batch.map(async (call) => ({ call, result: await this.executeTool(call) })));
+        for (const { call, result } of settled) {
+          opts.onTool?.(call.name, result.output.split("\n")[0]?.slice(0, 100) ?? "");
+          this.pushToolResult(call.id, call.name, result.output);
+        }
+      }
+
+      // ── Mid-turn steering (Scale Batch 4): poll the session's steering
+      // queue at the tool-call boundary — after the tool results are on the
+      // transcript (assistant→tool adjacency is required by strict
+      // OpenAI-compatible gateways), before the next model turn. A queued
+      // correction steers the very next step instead of waiting for run end.
+      // Slash commands are never steering; they stay in the session queue.
+      // Ctrl+C semantics are unchanged.
+      if (this.deps.steering) {
+        try {
+          for (const line of this.deps.steering.drain()) {
+            this.messages.push({ role: "user", parts: [{ type: "text", text: line }] });
+          }
+        } catch {
+          /* steering must never break the run */
+        }
       }
     }
   }
@@ -677,6 +752,31 @@ function summarizeArgs(args: Record<string, unknown>): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Sleep that wakes early on cancellation — a 30s retry-after must not glue Ctrl+C shut. */
+async function cancellableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        signal.removeEventListener("abort", finish);
+      } catch {
+        /* signal api polyfill */
+      }
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    try {
+      signal.addEventListener("abort", finish, { once: true });
+    } catch {
+      /* no addEventListener — plain sleep */
+    }
+  });
 }
 
 /** Best-effort path hint from truncated write/append args (for error messages). */

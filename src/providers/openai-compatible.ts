@@ -55,7 +55,11 @@ export class OpenAICompatibleProvider implements Provider {
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
       const retryable = res.status === 429 || res.status >= 500;
-      throw new ProviderError(`provider HTTP ${res.status}: ${text.slice(0, 300)}`, res.status, retryable);
+      // Retry v2: surface the provider's own timing hint (retry-after in
+      // seconds or retry-after-ms in milliseconds) so the loop's backoff
+      // honors it instead of guessing.
+      const hint = parseRetryAfter(res.headers.get("retry-after"), res.headers.get("retry-after-ms"));
+      throw new ProviderError(`provider HTTP ${res.status}: ${text.slice(0, 300)}`, res.status, retryable, hint);
     }
 
     // Inactivity watchdog: if no chunk arrives for streamTimeoutSeconds,
@@ -286,6 +290,19 @@ function joinUrl(base: string, path: string): string {
 
 function numberOr(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+}
+
+/** Retry v2: parse retry-after (seconds; may be an HTTP-date we ignore) or retry-after-ms. */
+function parseRetryAfter(secondsHeader: string | null, msHeader: string | null): number | undefined {
+  if (msHeader) {
+    const ms = Number(msHeader);
+    if (Number.isFinite(ms) && ms >= 0) return ms;
+  }
+  if (secondsHeader) {
+    const s = Number(secondsHeader);
+    if (Number.isFinite(s) && s >= 0) return s * 1000;
+  }
+  return undefined;
 }
 
 function details(u: Record<string, unknown>): Record<string, unknown> {

@@ -157,7 +157,7 @@ export function parseConfig(root: Record<string, unknown>): TelosConfig {
       maxParallelWorkers: expectInt(runtime["max_parallel_workers"], "runtime.max_parallel_workers", { min: 0, fallback: 2 }),
       maxWallTimeSeconds: expectInt(runtime["max_wall_time_seconds"], "runtime.max_wall_time_seconds", { min: 10, fallback: 900 }),
       shellTimeoutSeconds: expectInt(runtime["shell_timeout_seconds"], "runtime.shell_timeout_seconds", { min: 1, fallback: 120 }),
-      maxStreamAttempts: expectInt(runtime["max_stream_attempts"], "runtime.max_stream_attempts", { min: 1, max: 5, fallback: 2 }),
+      maxStreamAttempts: expectInt(runtime["max_stream_attempts"], "runtime.max_stream_attempts", { min: 1, max: 5, fallback: 5 }),
       minTestCount: expectInt(runtime["min_test_count"], "runtime.min_test_count", { min: 0, fallback: 1 }),
       streamTimeoutSeconds: expectInt(runtime["stream_timeout_seconds"], "runtime.stream_timeout_seconds", { min: 0, fallback: 120 }),
       compactionThresholdTokens: expectInt(runtime["compaction_threshold_tokens"], "runtime.compaction_threshold_tokens", { min: 0, fallback: 60_000 }),

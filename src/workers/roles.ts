@@ -6,6 +6,17 @@
 
 export type WorkerRole = "explorer" | "researcher" | "reviewer" | "qa";
 
+/**
+ * Explore-class roles (Scale Batch 4): pure investigation, never mutation —
+ * the OpenCode Task/explore pattern. The runtime strips any mutative tool
+ * from these roles' scoped registries (defense in depth against a role
+ * allowlist ever listing one); QA stays read-MOSTLY by contract, not class.
+ */
+export const READ_ONLY_ROLES: ReadonlySet<WorkerRole> = new Set(["explorer", "researcher", "reviewer"]);
+
+/** Extra contract line for exploration roles: findings must cite file:line. */
+const CITE_SOURCES = "Cite every finding's location as path:line (or command output when there is no file) — uncited claims are not findings.";
+
 export interface RoleSpec {
   role: WorkerRole;
   /** Tools this role may use (subset of the shared registry). */
@@ -23,7 +34,7 @@ export const ROLES: Record<WorkerRole, RoleSpec> = {
     mission:
       "Map the repository territory relevant to the question: which files own which behavior, how components connect, and where the risk of change concentrates.",
     outputContract:
-      "Report with sections: FINDING (one claim per finding), EVIDENCE (file:line or command output backing it), RISK (what could break), RECOMMENDATION (what the Manager should do).",
+      `Report with sections: FINDING (one claim per finding), EVIDENCE (file:line or command output backing it), RISK (what could break), RECOMMENDATION (what the Manager should do). ${CITE_SOURCES}`,
   },
   researcher: {
     role: "researcher",
@@ -31,7 +42,7 @@ export const ROLES: Record<WorkerRole, RoleSpec> = {
     mission:
       "Answer questions about external libraries, APIs, and frameworks from the repository's own dependency files and docs; clearly separate what you verified from what you could not.",
     outputContract:
-      "Report with sections: FINDING, EVIDENCE (quote the dependency manifest, doc line, or code you verified), CONFIDENCE (high/medium/low with what remains unverified).",
+      `Report with sections: FINDING, EVIDENCE (quote the dependency manifest, doc line, or code you verified), CONFIDENCE (high/medium/low with what remains unverified). ${CITE_SOURCES}`,
   },
   reviewer: {
     role: "reviewer",
@@ -39,7 +50,7 @@ export const ROLES: Record<WorkerRole, RoleSpec> = {
     mission:
       "Adversarially review the proposed or completed change: correctness, edge cases, regressions, and conflicts with existing architecture or user rules.",
     outputContract:
-      "Report with sections: VERDICT (approve / request_changes), FINDING (defects only, one per finding, with severity), EVIDENCE (file:line), OBJECTION (any plan-level disagreement with your recommended alternative).",
+      `Report with sections: VERDICT (approve / request_changes), FINDING (defects only, one per finding, with severity), EVIDENCE (file:line), OBJECTION (any plan-level disagreement with your recommended alternative). ${CITE_SOURCES}`,
   },
   qa: {
     role: "qa",

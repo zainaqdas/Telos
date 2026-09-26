@@ -207,6 +207,17 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       const after = effectiveMaxOutput(modelLimits);
       if (after < before) out(`  ℹ provider output cap observed: ~${after} tokens (completions truncated) — compaction adjusted`);
     },
+    /** Mid-turn steering (Scale Batch 4): the loop polls this at every
+     *  tool-call boundary; queued user lines join the context immediately.
+     *  Only plain input steers — slash commands stay in the session queue. */
+    steering: {
+      drain: () =>
+        pendingLines.splice(0, pendingLines.length).filter((line) => {
+          const isCommand = line.startsWith("/");
+          if (isCommand) pendingLines.push(line);
+          return !isCommand;
+        }),
+    },
     onNotice: (text) => {
       if (text.startsWith("Runtime lesson")) out(`  ℹ ${text.slice(0, 140)}`);
       else if (text.startsWith("PROJECT MEMORY") && process.env["TELOS_DEBUG_MEMORY"] === "1") {
