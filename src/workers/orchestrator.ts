@@ -9,7 +9,7 @@ import { ManagerLoop } from "../manager/loop.ts";
 import type { Provider } from "../providers/types.ts";
 import type { ToolExecContext } from "../tools/registry.ts";
 import type { SynergonConfig } from "../config/schema.ts";
-import type { CancellationController } from "../runtime/cancellation.ts";
+import { CancellationController } from "../runtime/cancellation.ts";
 import type { FailureLearner } from "../memory/pipeline.ts";
 
 /**
@@ -65,6 +65,11 @@ interface WorkerSession {
   /** What the worker said it is waiting for (from its last WAITING line). */
   waitingFor?: string;
   lastReport: WorkerReport;
+  /** Per-worker cancellation (Part 62): stopping one worker must not touch
+   *  the manager, other workers, or the session's shell children. */
+  cancellation: CancellationController;
+  /** Set when the worker finished (or was stopped) — no longer stoppable. */
+  done?: boolean;
 }
 
 const VALID_ROLES = new Set(Object.keys(ROLES));
@@ -235,7 +240,13 @@ export class Orchestrator {
       context: req.context,
       cycles: 0,
       lastReport: emptyReport(),
+      cancellation: new CancellationController(),
     };
+    // One-way propagation: a SESSION-level interrupt (Ctrl+C, /cancel) also
+    // stops this worker's stream and children; a worker-level /stop does not
+    // touch the session or sibling workers.
+    const propagateSessionCancel = (): void => session.cancellation.cancel("session cancelled");
+    this.deps.cancellation.signal.addEventListener("abort", propagateSessionCancel, { once: true });
     this.sessions.set(workerId, session);
 
     // Parallel-write discipline (Part 91, defense in depth): while at least
@@ -278,6 +289,40 @@ export class Orchestrator {
   /** IDs of workers currently in the waiting state. */
   waitingWorkerIds(): string[] {
     return [...this.sessions.entries()].filter(([, s]) => s.waitingFor).map(([id]) => id);
+  }
+
+  /**
+   * Selective stop (Part 62): cancel ONE worker's current cycle — its model
+   * stream and any shell children it spawned — without touching the manager,
+   * other workers, or session-scoped resources. Waiting workers are stopped
+   * by dropping their session (they hold no running resources). The worker
+   * is recorded as stopped in the log.
+   */
+  stopWorker(workerId: string): { ok: boolean; message: string } {
+    const session = this.sessions.get(workerId);
+    if (!session) {
+      return { ok: false, message: `stop_workers: no such worker '${workerId}'. Active/waiting: ${this.activeWorkerIds().join(", ") || "none"}.` };
+    }
+    if (session.done) {
+      return { ok: false, message: `stop_workers: worker '${workerId}' has already finished.` };
+    }
+    session.cancellation.cancel(`worker ${workerId} stopped by user`);
+    this.deps.events.append("worker_completed", { id: workerId, ok: false, stopped: true });
+    session.done = true;
+    this.sessions.delete(workerId);
+    return { ok: true, message: `worker ${workerId} (${session.role}) stopped${session.waitingFor ? "; it was waiting and will not resume." : "."}` };
+  }
+
+  /** Stop every live worker (Part 62: stop workers); returns stopped ids. */
+  stopAllWorkers(): string[] {
+    const ids = this.activeWorkerIds();
+    for (const id of ids) this.stopWorker(id);
+    return ids;
+  }
+
+  /** IDs of workers that are waiting or mid-cycle (still resumable/stoppable). */
+  activeWorkerIds(): string[] {
+    return [...this.sessions.entries()].filter(([, s]) => !s.done).map(([id]) => id);
   }
 
   /**
@@ -458,6 +503,9 @@ export class Orchestrator {
 
   /** One investigation cycle: scoped loop run → report parse → reconcile. */
   private async runCycle(session: WorkerSession, extraContext?: string, isRetry = false): Promise<DelegationResult> {
+    if (session.done) {
+      return this.failed(`worker ${session.id} was stopped; no further cycles.`);
+    }
     const scoped = this.scopedRegistry(ROLES[session.role].allowedTools, session.role);
     const cycle = session.cycles + 1;
     const roleSpec = ROLES[session.role];
@@ -470,8 +518,8 @@ export class Orchestrator {
       registry: scoped,
       events: this.deps.events,
       budget: this.deps.budget, // shared pools: workers and manager draw the same budget (Part 22)
-      cancellation: this.deps.cancellation,
-      ctx: this.deps.ctx,
+      cancellation: session.cancellation, // per-worker scope: /stop kills this worker only
+      ctx: { ...this.deps.ctx, signal: session.cancellation.signal },
       learner: this.deps.learner,
       workerPromptOverride: {
         text:
@@ -489,6 +537,12 @@ export class Orchestrator {
     const result = await loop.run(
       (cycle === 1 ? `Answer the Manager's question: ${session.question}` : `Continue your investigation: ${extraContext ?? ""}`) + retryNote,
     );
+    if (session.done || result.status === "cancelled") {
+      // Stopped mid-cycle: worker_completed(stopped) is already recorded by
+      // stopWorker; never re-record, never parse a partial reply.
+      this.sessions.delete(session.id);
+      return this.failed(`worker ${session.id} (${session.role}) stopped by user.`);
+    }
     session.cycles = cycle;
     let report = parseWorkerReport(result.assistantText);
 
@@ -496,7 +550,7 @@ export class Orchestrator {
     // sections at all, spend ONE retry asking for the exact headers (the
     // content is usually good — only the shape is missing).
     const structured = report.findings.length > 0 || report.risks.length > 0 || report.recommendations.length > 0 || report.objections.length > 0 || report.verdict !== undefined || report.tested!.length > 0 || report.proposals.length > 0 || report.blockers.length > 0;
-    if (!structured && !isRetry && !result.assistantText.includes("WAITING:")) {
+    if (!structured && !isRetry && !result.assistantText.includes("WAITING:") && !session.done) {
       this.deps.events.append("failure", { source: "worker_contract", message: `${session.role} reply lacked required section headers; retrying once with format reminder` });
       return this.runCycle(session, extraContext, true);
     }
@@ -519,7 +573,8 @@ export class Orchestrator {
     }
 
     session.waitingFor = undefined;
-    this.deps.events.append("worker_completed", { id: session.id, ok: result.status !== "provider_error" && result.status !== "cancelled", cycle });
+    const stopped = session.done; // stopWorker may have flipped it during a tool call that ignored abort
+    this.deps.events.append("worker_completed", { id: session.id, ok: !stopped && result.status !== "provider_error", cycle, ...(stopped ? { stopped: true } : {}) });
     this.reconcile(session.id, session.role, report);
     if (cycle > 1) this.sessions.delete(session.id);
     return { workerId: session.id, role: session.role, report, tokens: result.usage.totalTokens, toolCalls: this.deps.budget.used.toolCalls };

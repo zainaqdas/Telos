@@ -251,7 +251,7 @@ export function apply(state: TeamState, ev: AgentEvent): void {
       break;
     case "worker_completed": {
       const w = state.workers.get(str(d["id"]));
-      if (w) w.status = bool(d["ok"], true) ? "completed" : "failed";
+      if (w) w.status = d["stopped"] === true ? "stopped" : bool(d["ok"], true) ? "completed" : "failed";
       break;
     }
     case "budget_exceeded":
@@ -270,6 +270,7 @@ export function apply(state: TeamState, ev: AgentEvent): void {
       state.task.endReason = str(d["reason"]);
       break;
     case "task_updated":
+    case "turn_summary":
     case "test_result":
     case "review_result":
     case "verification_result":

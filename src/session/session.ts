@@ -363,6 +363,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         attachedImages,
         fetchModels: () => fetchModelList(config.model, apiKey),
         compactNow: () => manager.compactNow(),
+        setManagerModel: (m: string) => manager.setModel(m),
         resetTask: (newTaskId: string) => {
           // Fresh task identity: new EventLog + reset budget, gate and
           // orchestrator rebind to it (worker sessions are task-scoped and
@@ -453,6 +454,7 @@ async function handleSlashCommand(
     providerCapabilities: () => import("../providers/types.ts").Capabilities;
     fetchModels: () => Promise<string[]>;
     compactNow: () => { compacted: boolean; removed: number; savedTokens: number };
+    setManagerModel: (model: string) => void;
     resetTask: (taskId: string) => void;
   },
 ): Promise<"exit" | undefined> {
@@ -512,7 +514,9 @@ async function handleSlashCommand(
         "/models          capabilities of the active model + known models for the provider",
         "/cancel          cancel the running task (works mid-run)",
         "/correct <text>  send a correction (highest priority, invalidates conflicting work)",
-        "/model           show configured model (change via config/env)",
+        "/model [name]    show the configured model, or switch to <name> (validated against the endpoint catalog)",
+        "/stop [id]       list live workers, or stop one worker's stream and children (session keeps running)",
+        "/stop-workers    stop every live worker",
         "/exit            quit Synergon",
       ].join("\n"));
       return;
@@ -529,7 +533,7 @@ async function handleSlashCommand(
         `model      ${deps.config.model.provider}/${deps.config.model.name}`,
         `tokens     ${u.tokens} / ${l.maxTotalTokens}`,
         `tool calls ${u.toolCalls} / ${l.maxToolCalls}`,
-        `workers    ${u.workersSpawned} / ${l.maxWorkerSpawns} (parallel ${u.runningWorkers}/${l.maxParallelWorkers})`,
+        `workers    ${u.workersSpawned} / ${l.maxWorkerSpawns} (parallel ${u.runningWorkers}/${l.maxParallelWorkers})${deps.orchestrator.activeWorkerIds().length ? ` · live: ${deps.orchestrator.activeWorkerIds().join(", ")} (/stop <id>)` : ""}`,
         `waiting    ${waiting.length ? waiting.join(", ") : "(none)"}`,
         `collab     proposals ${activeProposals} active / ${needsRework} needs-rework · blockers ${openBlockers} open · objections ${openObjections} unresolved`,
         `wall time  ${Math.round((Date.now() - u.startedAt) / 1000)}s / ${l.maxWallTimeSeconds}s`,
@@ -690,9 +694,49 @@ async function handleSlashCommand(
       deps.manager.requestCancel();
       out("[cancel requested]");
       return;
-    case "model":
-      out(`${deps.config.model.provider} / ${deps.config.model.name || "(unset)"}`);
+    case "stop": {
+      // Part 62: stop workers. `/stop` lists live workers; `/stop <id>` stops
+      // that worker's stream and shell children without touching the session.
+      const arg = (args[0] ?? "").trim();
+      if (!arg) {
+        const active = deps.orchestrator.activeWorkerIds();
+        out(active.length ? `active workers: ${active.join(", ")}` : "no active workers");
+        return;
+      }
+      const r = deps.orchestrator.stopWorker(arg);
+      out(r.message);
       return;
+    }
+    case "stop-workers": {
+      const ids = deps.orchestrator.stopAllWorkers();
+      out(ids.length ? `stopped: ${ids.join(", ")}` : "no active workers");
+      return;
+    }
+    case "model": {
+      // Part 61: view, and now switch. `/model` prints; `/model <name>` swaps
+      // the manager's model mid-session (worker default stays worker_model).
+      const target = args.join(" ").trim();
+      if (!target) {
+        out(`${deps.config.model.provider} / ${deps.config.model.name || "(unset)"}`);
+        return;
+      }
+      // Live capability probe — a wrong model name should fail here, loudly,
+      // not on the next instruction with a confusing provider error.
+      try {
+        const probe = deps.fetchModels();
+        const known = await probe;
+        if (known.length > 0 && !known.includes(target)) {
+          out(`model "${target}" is not in the endpoint's catalog; current model unchanged (${deps.config.model.name}). Use /models to list valid names.`);
+          return;
+        }
+      } catch {
+        /* discovery is best-effort — allow the switch if the endpoint is unreachable */
+      }
+      deps.config.model.name = target;
+      deps.setManagerModel(target);
+      out(`model switched: ${deps.config.model.provider}/${target}`);
+      return;
+    }
     case "exit":
     case "quit":
       return "exit";

@@ -1,5 +1,15 @@
 # Synergon — Phase Reports
 
+## Phase 12 — Compliance Gap Closure (Parts 61, 62, 66)
+
+The compliance audit (docs/COMPLIANCE.md) flagged three small feature gaps. All closed:
+
+- **`/model [name]`** (Part 61): the bare command still shows the active model; an argument switches the manager's model mid-session after validating the name against the endpoint's live model catalog (best-effort — an unreachable endpoint doesn't block the switch). ManagerLoop.setModel rebinds the model for subsequent calls; turn_summary records the model that actually served each turn. Worker default (`worker_model`) is unaffected.
+- **`/stop <id>` and `/stop-workers`** (Part 62): every worker now owns a CancellationController. `/stop <id>` cancels that worker's stream and its shell children (children bind via a per-execution `ctx.cancellation`, so a stopped worker's `run_shell` tree dies while the session's shells are untouched) without disturbing the manager or sibling workers; the reducer records `worker_completed(stopped: true)` → status `stopped`; double-stop is refused; a stopped cycle never parses partial output or fires the format retry. Session-level cancellation still reaches workers through one-way abort propagation — Ctrl+C kills everything, `/stop` kills one thing.
+- **Structured per-turn observability** (Part 66): every tool event now carries the model's `tool_call_id`, and every manager run appends a `turn_summary` event — provider, model, status, model_calls, input/output/cached/total tokens, tool_calls, cost_usd (null unless known, Part 24), wall_ms, gate_verdict — making the JSONL log fully self-describing for external analysis.
+
+**Tested** — 5 new tests (`test/gaps.test.ts`): turn_summary field completeness (including null-cost discipline), tool_call_id propagation from the provider's tool_call into tool_started, stopWorker isolation (session controller untouched, stopped status in reducer, double-stop refused, unwinding cycle returns cleanly), session→worker abort propagation, and setModel taking effect on the very next call. 156/156 unit tests, 6/6 scenarios, tsc clean.
+
 ## Phase 11 (spec Part 96) — Optimization: Measured, Then Done
 
 **Doctrine first** — Part 96 says "Only after real usage … Measure before optimizing." So this phase shipped a **benchmark** before a single optimization: `evals/bench.ts` (`npm run bench`) drives the runtime's per-turn hot paths over a synthetic 2000-event task log and reports ms/op for event-log reads, gate evaluation, memory retrieval, skill routing, and transcript token accounting.

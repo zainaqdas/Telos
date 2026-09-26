@@ -25,6 +25,9 @@ export interface ToolExecContext {
   shellTimeoutSeconds: number;
   /** Cancellation signal — network/shell tools should honor it. */
   signal?: AbortSignal;
+  /** Optional per-scope controller (Part 62): a worker's shell children bind
+   *  to the worker's controller so /stop <id> kills them, not the session's. */
+  cancellation?: import("../runtime/cancellation.ts").CancellationController;
 }
 
 export interface ToolDefinition {

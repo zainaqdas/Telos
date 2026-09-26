@@ -38,6 +38,7 @@ export type EventKind =
   | "requirement_invalidated"
   | "skill_activated"
   | "budget_exceeded"
+  | "turn_summary"
   | "task_completed"
   | "task_cancelled";
 
@@ -114,7 +115,7 @@ export interface TeamState {
   proposals: Map<string, { statement: string; raisedBy: string; status: "active" | "invalidated" | "superseded" | "needs_rework"; t: number }>;
   /** Skill checklist bookkeeping for the gate's audit (Part 36). */
   skills: Map<string, { name: string; source: string; status: "active"; requirementIds: string[]; activatedAt: number }>;
-  workers: Map<string, { role: string; status: "running" | "completed" | "failed"; startedAt: number }>;
+  workers: Map<string, { role: string; status: "running" | "completed" | "failed" | "stopped"; startedAt: number }>;
   budget: BudgetSnapshot;
   taskStatus: TaskStatus;
   endReason?: string;

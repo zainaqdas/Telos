@@ -75,7 +75,9 @@ export function registerShellTools(registry: ToolRegistry, deps: ShellDeps): voi
           stdio: ["ignore", "pipe", "pipe"],
           env,
         });
-        deps.cancellation.track(child);
+        // Bind to the per-execution scope when one is provided (worker /stop),
+        // else the session controller (Ctrl+C still kills everything).
+        (ctx.cancellation ?? deps.cancellation).track(child);
 
         let stdout = "";
         let stderr = "";
@@ -115,7 +117,7 @@ export function registerShellTools(registry: ToolRegistry, deps: ShellDeps): voi
 
         child.on("close", (code, signal) => {
           if (settled && code === null) return; // already resolved via timeout path
-          const wasCancelled = deps.cancellation.isCancelled;
+          const wasCancelled = (ctx.cancellation ?? deps.cancellation).isCancelled;
           if (wasCancelled) {
             settle(result(false, "run_shell: cancelled by user", undefined, "cancelled"));
             return;

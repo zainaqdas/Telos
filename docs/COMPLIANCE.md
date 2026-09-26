@@ -36,10 +36,10 @@ Legend: ✅ implemented + tested · 🌐 live-verified against a real provider �
 | 55 | MCP via registry | ✅ 🌐 | JSON-RPC 2.0 stdio, zero deps; E2E + live harness (real subprocess); no MCP logic in Manager |
 | 56–59 | Review/QA/decisions/blockers | ✅ | decision ledger, blocker ids, waiver TTL; live collaboration harness |
 | 60 | Terminal UX | ✅ | raw-mode line editor, budget bar, streaming printer |
-| 61 | Core slash commands | ⚠️ | 16 of 14+ implemented; **missing: /model set-form (view-only, no argument handling)** — /help /models /provider /skills /memory /status /diff /undo /retry /compact /new /clear /exit all present |
-| 62 | User control (interrupt/cancel/correct/stop workers…) | ⚠️ | interrupt/cancel/correct/retry/inspect(/status /diff /collab)/waive all present; **gap: no dedicated stop-workers command — Ctrl+C cancels the whole run including workers, but individual workers cannot be stopped selectively** |
+| 61 | Core slash commands | ✅ | /help /model [name] (view + validated mid-session switch) /models /provider /skills /memory /status /diff /undo /retry /compact /new /clear /exit |
+| 62 | User control (interrupt/cancel/correct/stop workers…) | ✅ | interrupt/cancel/correct/retry/waive/inspect; /stop <id> kills one worker's stream + shell children (per-worker cancellation scope, one-way session→worker propagation), /stop-workers stops all; /status lists live workers |
 | 63–65 | Source of truth, runtime over prompt | ✅ | deterministic enforcement throughout (budgets, gate, guard, constraints) |
-| 66 | Structured observability | ⚠️ | event log carries task/event ids, tool names, timings (t), usage, errors; **gaps: no tool-call-id field on events, no per-turn log line surfacing provider/model/cost/budget in one structured record** (cost+model are visible in /status instead) |
+| 66 | Structured observability | ✅ | tool events carry tool_call_id; every manager run appends turn_summary (provider, model, status, token granularity, tool calls, cost_usd when known, wall_ms, gate verdict); no secrets logged |
 | 67 | Session history | ✅ | JSONL event logs per task under .project-agent/events/, replayable by the reducer |
 | 68 | Context compaction | ✅ | /compact + automatic threshold; reducer-built digest preserves corrections/blockers/objections |
 | 69–70 | Project file layout, configuration | ✅ | .project-agent/{config.toml,events,memory,skills}; TOML subset parser |
@@ -54,9 +54,6 @@ Legend: ✅ implemented + tested · 🌐 live-verified against a real provider �
 ## Honest gap list (small, but real)
 
 1. **Anthropic native provider is mock-verified only** — needs a real `ANTHROPIC_API_KEY` run to upgrade to 🌐.
-2. **`/model` is view-only** — Part 61 lists it as a core command; switching models mid-session isn't implemented.
-3. **No selective stop-workers** — Part 62's user-control list is otherwise complete; stopping an individual worker means cancelling the whole run.
-4. **Observability thin spots** (Part 66) — no tool-call-id on events; provider/model/cost/budget surface in /status rather than one structured per-turn record.
-5. **Acceptance tasks 80–83 not replicated verbatim live** — their *behaviors* are all covered (worker routing, research evidence, gate BLOCKED on unverified skill checklist), but not as dedicated verbatim-prompt live evals.
+2. **Acceptance tasks 80–83 not replicated verbatim live** — their *behaviors* are all covered (worker routing, research evidence, gate BLOCKED on unverified skill checklist), but not as dedicated verbatim-prompt live evals.
 
-Nothing on this list is architectural; items 2–4 are small feature completions, item 1 needs a key, item 5 needs harness time.
+Former gaps 2–4 (/model switching, selective stop-workers, structured per-turn observability) were closed and are covered by tests in `test/gaps.test.ts`. Nothing remaining is architectural; item 1 needs a key, item 2 needs harness time.

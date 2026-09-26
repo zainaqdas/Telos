@@ -80,6 +80,7 @@ export class ManagerLoop {
   private guard: RepetitionGuard;
   private readonly deps: ManagerDeps;
   private usage: Usage = emptyUsage();
+  private turnStartedAt = 0;
   private busy = false;
   private streamRetries = 0;
   private readonly isWorker: boolean;
@@ -103,6 +104,11 @@ export class ManagerLoop {
   /** Request cooperative cancellation of the current run. */
   requestCancel(): void {
     this.deps.cancellation.cancel("user requested cancellation");
+  }
+
+  /** /model <name> (Part 61): switch the manager's model mid-session. */
+  setModel(model: string): void {
+    (this.deps as { model: string }).model = model;
   }
 
   /** /new (Part 61): fresh task — transcript, guard, and usage start over. */
@@ -133,6 +139,7 @@ export class ManagerLoop {
   async run(instruction: string, opts: RunOptions = {}): Promise<RunResult> {
     const isCorrection = opts.isCorrection === true;
     this.busy = true;
+    this.turnStartedAt = Date.now();
 
     // Worker loops do not re-record instructions or re-route skills; their
     // findings enter the shared event stream through the orchestrator.
@@ -331,14 +338,14 @@ export class ManagerLoop {
 
     const schemaCheck = validateToolArgs(args, tool.parameters);
     if (!schemaCheck.ok) {
-      this.deps.events.append("tool_failed", { name: call.name, category: "bad_args", message: schemaCheck.error });
+      this.deps.events.append("tool_failed", { name: call.name, tool_call_id: call.id, category: "bad_args", message: schemaCheck.error });
       this.guard.recordNonStorm(key, fingerprint, "bad_args");
       return { output: `tool ${call.name}: invalid arguments — ${schemaCheck.error}. Fix the arguments and try again.` };
     }
 
     const decision = this.guard.evaluate(key, fingerprint, Date.now(), call.name);
     if (decision.verdict === "REPEATED_FAILURE" || decision.verdict === "KNOWN_BAD_PATTERN") {
-      this.deps.events.append("tool_failed", { name: call.name, category: decision.verdict, message: decision.reason });
+      this.deps.events.append("tool_failed", { name: call.name, tool_call_id: call.id, category: decision.verdict, message: decision.reason });
       return {
         output: `REPETITION GUARD: ${decision.verdict} — ${decision.reason}. Do not repeat this call unchanged. Change something material (code, command, or state) first, or stop and report.`,
       };
@@ -349,7 +356,7 @@ export class ManagerLoop {
     if (constraintBlock) return { output: constraintBlock };
 
     this.deps.budget.record("tool_call");
-    this.deps.events.append("tool_started", { name: call.name, args_summary: summarizeArgs(args) });
+    this.deps.events.append("tool_started", { name: call.name, tool_call_id: call.id, args_summary: summarizeArgs(args) });
 
     let result;
     try {
@@ -359,7 +366,7 @@ export class ManagerLoop {
       // environment storms — they count for repetition, not for lockout.
       const msg = (err as Error).message;
       if (/escapes workspace|bad_args|invalid/i.test(msg)) {
-        this.deps.events.append("tool_failed", { name: call.name, category: "bad_args", message: msg });
+        this.deps.events.append("tool_failed", { name: call.name, tool_call_id: call.id, category: "bad_args", message: msg });
         this.guard.recordNonStorm(key, fingerprint, "bad_args");
         return { output: `tool ${call.name}: ${msg}. Correct the arguments — do not retry unchanged.` };
       }
@@ -367,7 +374,7 @@ export class ManagerLoop {
     }
 
     if (result.ok) {
-      this.deps.events.append("tool_completed", { name: call.name, bytes: result.output.length });
+      this.deps.events.append("tool_completed", { name: call.name, tool_call_id: call.id, bytes: result.output.length });
       this.guard.record(key, fingerprint, true, undefined, Date.now(), call.name);
       // A workspace edit is runtime evidence that a "fix" checklist step happened.
       if (call.name === "edit_file" || call.name === "write_file") {
@@ -381,7 +388,7 @@ export class ManagerLoop {
         call.name === "run_shell" && typeof exitCode === "number" && exitCode !== 0
           ? classifyShellFailure(result.output, exitCode)
           : result.errorCategory ?? "tool_error";
-      this.deps.events.append("tool_failed", { name: call.name, category, message: result.output.slice(0, 300) });
+      this.deps.events.append("tool_failed", { name: call.name, tool_call_id: call.id, category, message: result.output.slice(0, 300) });
       this.guard.record(key, fingerprint, false, category, Date.now(), call.name);
       // Failure learning pipeline (Part 28): classify, record, promote on recurrence.
       if (this.deps.learner) {
@@ -580,6 +587,28 @@ export class ManagerLoop {
 
   private finish(status: RunResult["status"], assistantText: string, gate: GateReport | null = null): RunResult {
     this.busy = false;
+    // Structured per-turn observability (Part 66): one event carrying task ID,
+    // model calls, token granularity, tool-call count, wall time, final
+    // status, and gate verdict — machine-readable, no secrets. Worker loops
+    // skip it (their spend lands on the shared budget and the manager's own
+    // summary covers the turn).
+    if (!this.isWorker) {
+      const u = this.usage;
+      this.deps.events.append("turn_summary", {
+        model: this.deps.model,
+        provider: this.deps.provider.name,
+        status,
+        model_calls: u.modelCalls,
+        input_tokens: u.inputTokens,
+        output_tokens: u.outputTokens,
+        cached_tokens: u.cachedTokens,
+        total_tokens: u.totalTokens,
+        tool_calls: u.toolCalls,
+        cost_usd: u.costUsd,
+        wall_ms: Date.now() - this.turnStartedAt,
+        gate_verdict: gate?.verdict ?? null,
+      });
+    }
     return { status, gate, usage: this.usage, assistantText };
   }
 }
