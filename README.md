@@ -116,6 +116,7 @@ API keys are read from the environment only — never written to prompts, logs, 
 npm install
 npm test             # node:test suite, includes process-tree and end-to-end tests
 npm run eval:scenarios  # spec-mandated scenario evals (repetition, gate, budgets, cancellation, correction)
+npm run eval:acceptance # verbatim acceptance tasks (Parts 80-83: tiny / research / complex bug / skill-blocked)
 npm run bench         # hot-path benchmark (Part 96: measure before optimizing)
 npm run typecheck
 ```

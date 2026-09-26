@@ -68,3 +68,18 @@ test("recordUsage accumulates provider usage into token counter", () => {
   assert.equal(b.used.tokens, 165);
   assert.equal(b.used.modelCalls, 2);
 });
+
+test("workerFinished releases the parallel slot so sequential delegations are allowed", () => {
+  const b = make(); // maxWorkerSpawns: 2, maxParallelWorkers: 1
+  b.record("worker_spawn");
+  assert.equal(b.used.runningWorkers, 1);
+  // Without a release, a second sequential spawn would be refused even
+  // though the first worker already finished (the acceptance suite caught
+  // exactly this: `parallel workers 2/1` on delegation #2).
+  b.workerFinished();
+  assert.equal(b.used.runningWorkers, 0);
+  assert.equal(b.check("worker_spawn").allowed, true, "sequential re-delegation allowed after release");
+  b.record("worker_spawn");
+  assert.equal(b.used.runningWorkers, 1);
+  assert.equal(b.check("worker_spawn").allowed, false, "true parallelism is still bounded");
+});

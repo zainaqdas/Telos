@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
     "eval:scenarios": "node --experimental-strip-types --no-warnings evals/scenarios/scenario.ts",
+    "eval:acceptance": "node --experimental-strip-types --no-warnings evals/acceptance/acceptance.ts",
     "bench": "node --experimental-strip-types --no-warnings evals/bench.ts"
   },
   "devDependencies": {

@@ -45,7 +45,7 @@ Legend: ✅ implemented + tested · 🌐 live-verified against a real provider �
 | 69–70 | Project file layout, configuration | ✅ | .project-agent/{config.toml,events,memory,skills}; TOML subset parser |
 | 71 | Global + project skills, precedence | ✅ | builtin → ~/.telos/skills → project; project wins; documented |
 | 72–79 | Evaluation philosophy + mandatory scenarios | ✅ 🌐 | evals/scenarios (P74 correction, P76 repetition, P77 gate, P78 budget, P79 cancellation) + 4 live harnesses (collaboration/commands/web/MCP) |
-| 80–83 | Acceptance tasks (tiny/research/complex/skill) | ⚠️ | covered by unit + scenario equivalents (skill-acceptance = gate BLOCKED test exists); **no dedicated live eval dir replicating Parts 80–83 verbatim prompts** |
+| 80–83 | Acceptance tasks (tiny/research/complex/skill) | ✅ | evals/acceptance (`npm run eval:acceptance`): verbatim spec inputs; asserted shapes — 0 workers + gate COMPLETE (P80), researcher-only + zero writes (P81), explorer→qa red→fix→qa green→reviewer (P82), tests pass but unmet browser-verification checklist refuses completion (P83; gate names the missing requirement). P82 exposed a real bug — BudgetEnforcer.workerFinished was never called, so the second sequential delegation hit `parallel workers 2/1` — fixed and regression-tested |
 | 84–96 | Phase roadmap 0–11 | ✅ 🌐 | all phases implemented; docs/PHASES.md reports; measure-first doctrine honored (bench before opt) |
 | 97–100 | Engineering rules (no overbuild, deterministic enforcement…) | ✅ | zero runtime deps held; optimization only after measurement; enforcement in code not prompts |
 | 101 | True MVP definition | ✅ | every MVP element present and individually tested |
@@ -53,7 +53,6 @@ Legend: ✅ implemented + tested · 🌐 live-verified against a real provider �
 
 ## Honest gap list (small, but real)
 
-1. **Anthropic native provider is mock-verified only** — needs a real `ANTHROPIC_API_KEY` run to upgrade to 🌐.
-2. **Acceptance tasks 80–83 not replicated verbatim live** — their *behaviors* are all covered (worker routing, research evidence, gate BLOCKED on unverified skill checklist), but not as dedicated verbatim-prompt live evals.
+1. **Anthropic native provider is mock-verified only** — needs a real `ANTHROPIC_API_KEY` run to upgrade to 🌐. This is now the **only** remaining gap, and it is key-blocked, not code-blocked.
 
-Former gaps 2–4 (/model switching, selective stop-workers, structured per-turn observability) were closed and are covered by tests in `test/gaps.test.ts`. Nothing remaining is architectural; item 1 needs a key, item 2 needs harness time.
+Former gaps 2–4 (/model switching, selective stop-workers, structured per-turn observability) were closed and are covered by tests in `test/gaps.test.ts`; gap 5 (verbatim acceptance evals, Parts 80–83) is now `evals/acceptance` and additionally caught a real budget-accounting bug on its first run. Nothing remaining is architectural.

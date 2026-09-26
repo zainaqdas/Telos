@@ -1,5 +1,19 @@
 # Telos — Phase Reports
 
+## Phase 13 — Verbatim Acceptance Evals (Parts 80–83) + a Real Budget Fix
+
+**`evals/acceptance/acceptance.ts` (`npm run eval:acceptance`)** runs the spec's four acceptance tasks with their **verbatim inputs** against the real loop, orchestrator, skill router, and gate (scripted provider, same doctrine as evals/scenarios):
+
+- **P80 tiny task** — "Rename foo to bar across the project.": asserts 0 delegations, focused edit_file calls, exactly one passing validation, tests-pass satisfied, gate COMPLETE.
+- **P81 research** — "Determine why library X is used and whether library Y is compatible.": asserts a researcher delegation, zero write tools used, and a manager conclusion; evidence quality flows through the worker output contract.
+- **P82 complex bug** — "Login sometimes redirects incorrectly.": asserts the full arc — explorer investigate, qa reproduce (red test_result), implement, qa verify (green), reviewer approve, gate COMPLETE, with tests-pass satisfied only via the green run.
+- **P83 skill acceptance** — "Browser verification required." as a project-skill checklist: asserts tests pass, zero browser_* tool calls, the checklist item stays pending, no task_completed, and the gate's summary names the missing verification. Documented mapping: our gate labels an unmet checklist INCOMPLETE (BLOCKED is reserved for blockers/needs-decision objections); the spec's invariant — completion refused — is identical.
+
+**The first run caught a real product bug** (the exact point of the suite): P82's second delegation was refused with `parallel workers 2/1` — BudgetEnforcer.workerFinished() existed but had **no call site**, so runningWorkers ratcheted up and any sequential second delegation was rejected. Fixed in the orchestrator's runDelegation finally-block (release the slot when a cycle ends, success, failure, or stop); true parallelism remains bounded. Regression test added in test/budget.test.ts.
+
+**Verification** — 4/4 acceptance tasks, 157/157 unit tests, 6/6 scenarios, tsc clean.
+
+
 ## Phase 12 — Compliance Gap Closure (Parts 61, 62, 66)
 
 The compliance audit (docs/COMPLIANCE.md) flagged three small feature gaps. All closed:

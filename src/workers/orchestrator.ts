@@ -263,6 +263,10 @@ export class Orchestrator {
       return this.failed(`worker ${workerId} (${req.role}) failed: ${(err as Error).message}`);
     } finally {
       releaseWriteStrip();
+      // Release the parallel slot (Part 22): worker_spawn incremented
+      // runningWorkers; without this decrement the count ratchets up and the
+      // next delegation is refused even when fully sequential.
+      this.deps.budget.workerFinished();
     }
   }
 
