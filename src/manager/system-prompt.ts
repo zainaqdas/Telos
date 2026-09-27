@@ -22,6 +22,7 @@ export function buildSystemPrompt(config: TelosConfig, repoProfile?: string, rep
     "- If a test or build fails, read the failure, fix the cause, and re-run. Do not declare success on hope.",
     "- Never claim completion. Completion is decided by the runtime's Completion Gate, not by you.",
     "- The user's latest instruction has top priority; if it conflicts with earlier work, follow it and say what you dropped.",
+    "- STEERING LINES: while you work, the user can type new messages; the runtime relays them mid-run, marked \"[STEERING] Live message from the user…\". Treat each steering line as the user's newest instruction — start honoring it at the next tool-call boundary and reflect it in your final report, even where it changes or extends the original task text. All other system rules are unchanged.",
     "",
     `AUTONOMY: ${config.runtime.autonomy}. Destructive/system-level commands are refused by the runtime regardless of autonomy.`,
     "",

@@ -27,6 +27,7 @@ import { loadConventions } from "../context/conventions.ts";
 import { registerPlanTools } from "../tools/plan-tool.ts";
 import { restRenderMarkdown } from "./rest-render.ts";
 import { StreamPrinter, streamWidth } from "./stream-printer.ts";
+import { partitionSteering } from "../manager/steering.ts";
 import { loadSkills } from "../skills/loader.ts";
 import { SkillRouter } from "../skills/router.ts";
 import { MemoryStore } from "../memory/store.ts";
@@ -235,13 +236,15 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     },
     /** Mid-turn steering (Scale Batch 4): the loop polls this at every
      *  tool-call boundary; queued user lines join the context immediately.
-     *  Only plain input steers — slash commands stay in the session queue. */
+     *  Only plain input steers — slash commands stay in the session queue
+     *  (partition is runtime-owned, manager/steering.ts). */
     steering: {
       drain: () =>
-        pendingLines.splice(0, pendingLines.length).filter((line) => {
-          const isCommand = line.startsWith("/");
-          if (isCommand) pendingLines.push(line);
-          return !isCommand;
+        partitionSteering(pendingLines).steer.map((line) => {
+          // Remove the steered line from the queue; deferred (/) lines stay.
+          const idx = pendingLines.indexOf(line);
+          if (idx >= 0) pendingLines.splice(idx, 1);
+          return line;
         }),
     },
     onNotice: (text) => {
@@ -316,7 +319,23 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     }
   };
 
-  stdin.on("data", onKeypress);
+  if (isRawSupported) {
+    stdin.on("data", onKeypress);
+  } else {
+    // Non-TTY (piped, harness, CI): lines arrive pre-split on stdin — the
+    // keypress parser would never see Enter. Same contract: lines typed while
+    // a run is busy queue as steering/corrections instead of being lost.
+    let lineBuf = "";
+    stdin.on("data", (buf: Buffer) => {
+      lineBuf += buf.toString("utf8");
+      let nl: number;
+      while ((nl = lineBuf.indexOf("\n")) !== -1) {
+        const line = lineBuf.slice(0, nl);
+        lineBuf = lineBuf.slice(nl + 1);
+        void handleLine(line);
+      }
+    });
+  }
 
   const shutdown = (code: number): void => {
     if (isRawSupported) stdin.setRawMode(false);

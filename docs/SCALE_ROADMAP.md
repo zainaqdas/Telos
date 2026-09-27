@@ -174,7 +174,12 @@ version bump for npm release at milestones (not per batch).
   journal hook (not run start); post-snapshot files are computed from a throwaway index BEFORE
   `read-tree` because untracked files are invisible to `git diff` (Batch 3).
 - **Item 13 (steering):** drain polls AFTER tool results are on the transcript (assistant→tool
-  adjacency for strict OpenAI-compatible gateways), not before (Batch 4).
+  adjacency for strict OpenAI-compatible gateways), not before. Post-ship hardening (verified live
+  on vyceai/deepseek-v4.1): non-TTY stdin gets a line-reader so piped sessions can steer at all,
+  and injected lines carry a deliberately non-adversarial `[STEERING]` marker — imperative
+  "OVERRIDES EVERYTHING" phrasing was rejected live by the model as a prompt-injection attempt;
+  the marker now states the facts (live user message, newest user instruction wins) and the
+  injection is announced on the terminal and event-logged (Batch 4 + follow-up).
 - **Item 19 (per-worker budgets):** sub-budget is a fixed bounded share
   (`WORKER_SUB_BUDGET`, 30 tool calls / 120k tokens) reported in the delegation event; exhaustion
   degrades the worker gracefully instead of hard-stopping the run — the shared budget remains the

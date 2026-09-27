@@ -17,6 +17,7 @@ import type { TelosConfig } from "../config/schema.ts";
 import type { SkillRouter } from "../skills/router.ts";
 import { FailureLearner } from "../memory/pipeline.ts";
 import { buildSystemPrompt } from "./system-prompt.ts";
+import { markSteering } from "./steering.ts";
 
 /**
  * The Manager task loop (Part 86). One persistent Manager drives model calls,
@@ -436,10 +437,25 @@ export class ManagerLoop {
       // correction steers the very next step instead of waiting for run end.
       // Slash commands are never steering; they stay in the session queue.
       // Ctrl+C semantics are unchanged.
+      // Precedence is runtime-enforced: every injected line carries the
+      // STEERING marker (see manager/steering.ts) that the system prompt
+      // explains as overriding the original instruction on conflict — the
+      // newest user word wins, deterministically marked, and the injection
+      // is event-logged and visible on the terminal.
       if (this.deps.steering) {
         try {
-          for (const line of this.deps.steering.drain()) {
-            this.messages.push({ role: "user", parts: [{ type: "text", text: line }] });
+          const lines = this.deps.steering.drain();
+          if (lines.length > 0) {
+            const notice = `steering: ${lines.length} line(s) injected mid-run — they override the original instruction where they conflict`;
+            this.deps.events.append("task_updated", { notice });
+            try {
+              this.deps.onNotice?.(notice);
+            } catch {
+              /* observers must never break the run */
+            }
+            for (const line of lines) {
+              this.messages.push({ role: "user", parts: [{ type: "text", text: markSteering(line) }] });
+            }
           }
         } catch {
           /* steering must never break the run */
