@@ -121,9 +121,9 @@ export class Panel {
       [
         ANSI.hideCursor,
         `\x1b[1;${Math.max(1, h - rows)}r`, // scroll region = transcript only
-        `\x1b[${Math.max(1, h - rows)};1H`, // park transcript cursor at region bottom
-        this.drawPanel(),
-        ANSI.save, // transcript position saved; cursor left in the panel
+        `\x1b[${Math.max(1, h - rows)};1H`, // move to region bottom = transcript position
+        ANSI.save, // SAVE FIRST: the slot must hold the TRANSCRIPT position
+        this.drawPanel(), // then draw the panel (cursor ends in the input row)
       ].join(""),
     );
     this.transcriptSaved = true;
@@ -138,9 +138,11 @@ export class Panel {
   }
 
   /**
-   * Write raw text into the transcript (streaming deltas included). The text
-   * continues exactly where the previous write ended; the region wraps and
-   * scrolls it. Panel repaint is throttled — deltas arrive in bursts.
+   * Write raw text into the transcript (streaming deltas included).
+   * Sequence: restore to the saved TRANSCRIPT position → write (the region
+   * wraps/scrolls; cursor now sits at the new end of text) → re-save THAT
+   * position. The panel repaint is throttled afterwards — deltas arrive in
+   * bursts, and repaints never touch the saved slot.
    */
   writeTranscript(text: string): void {
     if (!this.installed) {
@@ -148,8 +150,8 @@ export class Panel {
       return;
     }
     const head = this.transcriptSaved ? ANSI.restore : `\x1b[${Math.max(1, this.opts.height() - this.height)};1H`;
-    this.transcriptSaved = false;
-    this.writeRaw(head + text);
+    this.writeRaw(head + text + ANSI.save);
+    this.transcriptSaved = true;
     this.scheduleRepaint();
   }
 
@@ -178,24 +180,25 @@ export class Panel {
       this.resizeTimer = null;
       const h = this.opts.height();
       const rows = this.height;
-      // Transcript position is stale after a resize; drop the saved one.
-      this.writeRaw(`\x1b[r\x1b[1;${Math.max(1, h - rows)}r\x1b[${Math.max(1, h - rows)};1H`);
-      this.transcriptSaved = false;
+      // The old saved position is stale after a resize: re-anchor at the new
+      // region bottom, save it, repaint the panel at its new coordinates.
+      this.writeRaw(`\x1b[r\x1b[1;${Math.max(1, h - rows)}r\x1b[${Math.max(1, h - rows)};1H${ANSI.save}`);
+      this.transcriptSaved = true;
       this.repaintNow();
     }, 80);
     if (typeof this.resizeTimer.unref === "function") this.resizeTimer.unref();
   }
 
-  /** Immediate: save transcript cursor, draw panel, leave cursor in panel. */
+  /** Immediate: redraw the panel only. The saved slot (transcript position)
+   *  is untouched — it was saved by writeTranscript/install and must survive
+   *  every repaint, or the next transcript write lands in the panel. */
   private repaintNow(): void {
     if (!this.installed) return;
     if (this.repaintTimer) {
       clearTimeout(this.repaintTimer);
       this.repaintTimer = null;
     }
-    const seq = [this.transcriptSaved ? "" : "", this.drawPanel(), ANSI.save].join("");
-    this.transcriptSaved = true;
-    this.writeRaw(seq);
+    this.writeRaw(this.drawPanel());
   }
 
   /** Throttled repaint after transcript writes (bursts of deltas). */

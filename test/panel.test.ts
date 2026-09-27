@@ -70,24 +70,34 @@ test("Panel install: region set, panel drawn, cursor left in panel, position sav
   assert.ok(torn.includes("\x1b[?25h"), "cursor shown");
 });
 
-test("writeTranscript continues where the last write ended (DECRC), then re-saves", async () => {
+test("writeTranscript: every write is restore → text → re-save (uniform invariant)", async () => {
   const chunks: string[] = [];
   const p = new Panel({ write: (s) => chunks.push(s), width: () => 80, height: () => 24, panelHeight: 3, renderStatus: () => "st" });
   p.install();
   chunks.length = 0;
   p.writeTranscript("Hello ");
   let all = chunks.join("");
-  assert.ok(all.startsWith("\x1b8"), "first write restores the saved transcript position");
+  assert.ok(all.startsWith("\x1b8"), "write restores the saved transcript position");
+  assert.ok(all.endsWith("\x1b7"), "write re-saves the NEW transcript end");
   chunks.length = 0;
   p.writeTranscript("world");
   all = chunks.join("");
-  assert.ok(!all.startsWith("\x1b8"), "continuation does NOT re-jump (cursor already there)");
+  assert.ok(all.startsWith("\x1b8"), "next write restores again (slot = transcript end)");
   assert.ok(all.includes("world"));
-  // Throttled repaint fires within ~50ms and re-saves the position.
-  await new Promise((r) => setTimeout(r, 60));
-  const post = chunks.join("");
-  assert.ok(post.includes("\x1b7"), "repaint re-saves the transcript position");
-  assert.ok(post.includes("╭"), "repaint redraws the panel");
+  assert.ok(all.endsWith("\x1b7"));
+  // Panel repaint must NOT touch the saved slot: a repaint is pure drawing
+  // (cursor moves + glyphs), no save. The saved slot keeps pointing at the
+  // transcript end, so the next transcript write lands in the region.
+  chunks.length = 0;
+  p.setInput("typed", 5);
+  const repaint = chunks.join("");
+  assert.ok(repaint.includes("╭"), "repaint draws the panel");
+  assert.ok(!repaint.includes("\x1b7"), "repaint never overwrites the saved slot");
+  chunks.length = 0;
+  p.writeTranscript("more");
+  const after = chunks.join("");
+  assert.ok(after.startsWith("\x1b8"), "slot still points at transcript after repaints");
+  assert.ok(after.includes("more"));
 });
 
 test("print writes full lines into the region without touching the panel", () => {
