@@ -457,8 +457,6 @@ export async function syntaxCheck(path: string, content: string): Promise<Syntax
   if (ext === ".js" || ext === ".mjs" || ext === ".cjs") {
     const { writeFile, rm } = await import("node:fs/promises");
     const { spawnSync } = await import("node:child_process");
-    const tmp = join(path, "..");
-    void tmp;
     const tmpFile = `${path}.telos-check-${Date.now().toString(36)}.js`;
     try {
       await writeFile(tmpFile, content, "utf8");

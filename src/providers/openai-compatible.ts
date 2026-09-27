@@ -119,7 +119,13 @@ export class OpenAICompatibleProvider implements Provider {
           }
           const content = delta["content"];
           if (typeof content === "string" && content.length > 0) {
-            yield { type: "text_delta", text: content };
+            // <think> tag parsing (Scale Batch 5 item 20): gateways that
+            // inline reasoning into `content` (DeepSeek-R1-style, some vLLM
+            // templates) are split so reasoning renders dimmed via
+            // thinking_delta instead of polluting the answer text.
+            for (const piece of splitThink(content)) {
+              yield piece.thinking ? { type: "thinking_delta", text: piece.text } : { type: "text_delta", text: piece.text };
+            }
           }
           const toolChunks = delta["tool_calls"];
           if (Array.isArray(toolChunks)) {
@@ -172,8 +178,7 @@ export class OpenAICompatibleProvider implements Provider {
       // Watchdog aborts surface as retryable timeouts; genuine user cancels
       // (external signal) keep their AbortError identity.
       if (req.signal?.aborted) throw err;
-      const isWatchdogAbort = controller.signal.aborted && !req.signal?.aborted;
-      if (isWatchdogAbort) {
+      const isWatchdogAbort = controller.signal.aborted && !req.signal?.aborted;        if (isWatchdogAbort) {
         throw new ProviderError(
           `provider stream stalled: no data for ${this.streamTimeoutSeconds}s${sawAnyChunk ? " (mid-stream)" : " before first chunk"}`,
           undefined,
@@ -308,4 +313,67 @@ function parseRetryAfter(secondsHeader: string | null, msHeader: string | null):
 function details(u: Record<string, unknown>): Record<string, unknown> {
   const d = u["prompt_tokens_details"];
   return typeof d === "object" && d !== null ? (d as Record<string, unknown>) : {};
+}
+
+/**
+ * Split a content delta into thinking/answer pieces at <think>/</think>
+ * boundaries. Handles tags split across deltas with a tiny carry buffer
+ * (a partial trailing tag is held back until the next delta disambiguates).
+ */
+export function splitThink(delta: string, state: ThinkState = { inThink: false, carry: "" }): Array<{ text: string; thinking: boolean }> {
+  const pieces: Array<{ text: string; thinking: boolean }> = [];
+  let buf = state.carry + delta;
+  let inThink = state.inThink;
+
+  const emit = (text: string, thinking: boolean): void => {
+    if (text) pieces.push({ text, thinking });
+  };
+
+  while (buf.length > 0) {
+    if (inThink) {
+      const end = buf.indexOf("</think>");
+      if (end !== -1) {
+        emit(buf.slice(0, end), true);
+        buf = buf.slice(end + 8);
+        inThink = false;
+      } else {
+        // Hold back a possible partial '</think>' tail (≤ 8 chars).
+        const keep = partialTailLen(buf, ["</think>"]);
+        emit(buf.slice(0, buf.length - keep), true);
+        buf = buf.slice(buf.length - keep);
+        break;
+      }
+    } else {
+      const start = buf.indexOf("<think>");
+      if (start !== -1) {
+        emit(buf.slice(0, start), false);
+        buf = buf.slice(start + 7);
+        inThink = true;
+      } else {
+        const keep = partialTailLen(buf, ["<think>"]);
+        emit(buf.slice(0, buf.length - keep), false);
+        buf = buf.slice(buf.length - keep);
+        break;
+      }
+  }
+  }
+  state.inThink = inThink;
+  state.carry = buf;
+  return pieces;
+}
+
+export interface ThinkState {
+  inThink: boolean;
+  carry: string;
+}
+
+/** Length of the longest suffix of `s` that is a proper prefix of any marker. */
+function partialTailLen(s: string, markers: readonly string[]): number {
+  for (let len = Math.min(s.length, Math.max(...markers.map((m) => m.length)) - 1); len > 0; len -= 1) {
+    for (const m of markers) {
+      if (s.endsWith(m.slice(0, len))) return len;
+      break; // check each marker once; endsWith on the sliced prefix
+    }
+  }
+  return 0;
 }

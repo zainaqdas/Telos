@@ -124,9 +124,17 @@ export class CompletionGate {
     const waivedBlockers = state.blockers.filter((b) => b.status === "waived" && !(b.waiverExpiresAt !== undefined && b.waiverExpiresAt <= Date.now()));
     const undecidedObjections = state.objections.filter((o) => !o.resolved && o.debate?.verdict === "needs_decision");
 
+    // Plan audit (Scale Batch 5 item 16): the runtime stores the plan, so the
+    // model can't silently drift off it. A recorded plan with unfinished steps
+    // keeps the gate from declaring COMPLETE — the Manager must mark real
+    // progress via update_plan (or the plan is stale and must be re-scoped).
+    const planSteps = lastPlanSteps(events);
+    const planDone = planSteps.filter((s) => s.status === "done").length;
+    const planOpen = planSteps.length - planDone;
+
     let verdict: GateVerdict;
     if (blocked.length > 0 || openBlockers.length > 0 || undecidedObjections.length > 0) verdict = "BLOCKED";
-    else if (unsatisfied.length > 0 || invalidated.length > 0 || unverifiedWrites || changeRequestedButNotMade) verdict = "INCOMPLETE";
+    else if (unsatisfied.length > 0 || invalidated.length > 0 || unverifiedWrites || changeRequestedButNotMade || planOpen > 0) verdict = "INCOMPLETE";
     else verdict = "COMPLETE";
 
     const clip = (s: string): string => (s.length > 80 ? `${s.slice(0, 80)}…` : s);
@@ -137,6 +145,7 @@ export class CompletionGate {
     if (invalidated.length) parts.push(`invalidated: ${invalidated.join(", ")}`);
     if (unverifiedWrites) parts.push("workspace was modified but nothing was run to verify it");
     if (changeRequestedButNotMade) parts.push("instruction requested changes but no workspace change or verification occurred");
+    if (planOpen > 0) parts.push(`plan has ${planOpen} unfinished step(s) (${planDone}/${planSteps.length} done) — mark progress with update_plan, or re-scope the plan if it is stale`);
     for (const b of openBlockers) {
       const expired = b.status === "waived";
       parts.push(`open blocker ${b.id}${expired ? " (waiver expired)" : ""}: ${clip(b.reason)} — resolve via the decision tool${expired ? " or re-waive via /waive" : ""}`);
@@ -153,6 +162,25 @@ export class CompletionGate {
 
     return { verdict, satisfied, unsatisfied, blocked, invalidated, summary };
   }
+}
+
+/**
+ * The most recent plan (Scale Batch 5): the LAST plan_updated event wins —
+ * the plan is a whole-document replacement, so later events supersede.
+ */
+function lastPlanSteps(events: readonly AgentEvent[]): Array<{ text: string; status: string }> {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const ev = events[i]!;
+    if (ev.kind !== "plan_updated") continue;
+    const steps = ev.data["steps"];
+    if (!Array.isArray(steps)) continue;
+    return steps
+      .map((s) => (typeof s === "object" && s !== null ? (s as Record<string, unknown>) : null))
+      .filter((s): s is Record<string, unknown> => s !== null)
+      .map((s) => ({ text: String(s["text"] ?? ""), status: String(s["status"] ?? "pending") }))
+      .filter((s) => s.text.length > 0);
+  }
+  return [];
 }
 
 /** Format a Gate report for the transcript (no theater, facts only). */

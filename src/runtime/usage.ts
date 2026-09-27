@@ -135,6 +135,54 @@ export class BudgetEnforcer {
     this.state.runningWorkers = Math.max(0, this.state.runningWorkers - 1);
   }
 
+  // ─── Per-worker sub-budgets (Scale Batch 5, item 19) ────────────────────
+  //
+  // A 12-worker build must not starve the manager: each delegation carries
+  // its own tool-call/token sub-budget on top of the SHARED pools. The
+  // shared budget stays authoritative (a sub-budget can never authorize a
+  // spend the shared one refuses); sub-budgets just bound one worker's
+  // share of it.
+
+  /** Live sub-budget for a running worker id; absent ⇒ unlimited share. */
+  private readonly workerBudgets = new Map<string, { maxToolCalls: number; maxTokens: number; usedToolCalls: number; usedTokens: number }>();
+
+  /** Attach a sub-budget to a worker before its first cycle. */
+  setWorkerBudget(workerId: string, limits: { maxToolCalls: number; maxTokens: number }): void {
+    this.workerBudgets.set(workerId, { ...limits, usedToolCalls: 0, usedTokens: 0 });
+  }
+
+  /** Drop a worker's sub-budget (completed/stopped/waiting). */
+  clearWorkerBudget(workerId: string): void {
+    this.workerBudgets.delete(workerId);
+  }
+
+  /**
+   * Check + record one tool call against worker `workerId`'s sub-budget.
+   * Returns the shared verdict when no sub-budget is attached.
+   */
+  checkWorkerToolCall(workerId: string): BudgetVerdict {
+    const wb = this.workerBudgets.get(workerId);
+    if (!wb) return { allowed: true };
+    if (wb.usedToolCalls + 1 > wb.maxToolCalls) {
+      return { allowed: false, resource: "tool_calls", message: `worker tool-call sub-budget ${wb.usedToolCalls + 1}/${wb.maxToolCalls} exhausted` };
+    }
+    wb.usedToolCalls += 1;
+    return { allowed: true };
+  }
+
+  /** Accumulate reported usage onto a worker's sub-budget (bounded). */
+  recordWorkerUsage(workerId: string, totalTokens: number): void {
+    const wb = this.workerBudgets.get(workerId);
+    if (!wb) return;
+    wb.usedTokens += totalTokens;
+  }
+
+  /** True when the worker has burned through its token sub-budget. */
+  workerTokensExhausted(workerId: string): boolean {
+    const wb = this.workerBudgets.get(workerId);
+    return wb !== undefined && wb.usedTokens > wb.maxTokens;
+  }
+
   /** /new (Part 61): usage counters start over for the fresh task. */
   resetUsage(): void {
     this.state = { tokens: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, toolCalls: 0, modelCalls: 0, workersSpawned: 0, runningWorkers: 0, startedAt: this.nowFn() };

@@ -8,6 +8,7 @@ export type TaskStatus = "active" | "completed" | "cancelled" | "budget_exceeded
 export type EventKind =
   | "task_started"
   | "task_updated"
+  | "plan_updated"
   | "user_instruction"
   | "user_correction"
   | "finding"

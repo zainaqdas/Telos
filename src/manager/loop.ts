@@ -40,6 +40,8 @@ export interface ManagerDeps {
   skillRouter?: SkillRouter;
   learner?: FailureLearner;
   repoProfile?: string;
+  /** AGENTS.md/TELOS.md conventions (Scale Batch 5); system-prompt injection. */
+  conventions?: import("../context/conventions.ts").Conventions;
   /** Compact directory tree for large repos (Scale Batch 1); separate budget. */
   repoTree?: string;
   /** Worker-mode construction: replaces the system prompt, suppresses the
@@ -62,6 +64,12 @@ export interface ManagerDeps {
    * correction steers the very next step instead of waiting for run end.
    */
   steering?: { drain: () => string[] };
+  /**
+   * Per-worker sub-budget (Scale Batch 5): when set (worker loops), each tool
+   * call is additionally checked against this bounded share — a runaway
+   * worker can't starve the manager. The shared budget stays authoritative.
+   */
+  workerSubBudget?: { checkToolCall: () => { allowed: boolean; message?: string } };
 }
 
 export interface RunOptions {
@@ -109,7 +117,7 @@ export class ManagerLoop {
     this.guard = deps.guard ?? new RepetitionGuard(DEFAULT_GUARD_CONFIG);
     this.messages.push({
       role: "system",
-      parts: [{ type: "text", text: deps.workerPromptOverride ? deps.workerPromptOverride.text : buildSystemPrompt(deps.config, deps.repoProfile, deps.repoTree) }],
+      parts: [{ type: "text", text: deps.workerPromptOverride ? deps.workerPromptOverride.text : buildSystemPrompt(deps.config, deps.repoProfile, deps.repoTree, deps.conventions) }],
     });
     this.isWorker = deps.workerPromptOverride?.isWorker === true;
   }
@@ -134,7 +142,7 @@ export class ManagerLoop {
     this.messages.length = 0;
     this.messages.push({
       role: "system",
-      parts: [{ type: "text", text: this.deps.workerPromptOverride ? this.deps.workerPromptOverride.text : buildSystemPrompt(this.deps.config, this.deps.repoProfile, this.deps.repoTree) }],
+      parts: [{ type: "text", text: this.deps.workerPromptOverride ? this.deps.workerPromptOverride.text : buildSystemPrompt(this.deps.config, this.deps.repoProfile, this.deps.repoTree, this.deps.conventions) }],
     });
     this.guard = this.deps.guard ?? new RepetitionGuard(DEFAULT_GUARD_CONFIG);
     this.usage = emptyUsage();
@@ -370,12 +378,22 @@ export class ManagerLoop {
         let failAt = -1;
         let failResource: string | undefined;
         let failMessage: string | undefined;
+        let failIsSubBudget = false;
         for (let b = 0; b < batch.length; b += 1) {
           const toolVerdict = this.deps.budget.check("tool_call");
           if (!toolVerdict.allowed) {
             failAt = b;
             failResource = toolVerdict.resource;
             failMessage = toolVerdict.message;
+            failIsSubBudget = false;
+            break;
+          }
+          const sub = this.deps.workerSubBudget?.checkToolCall();
+          if (sub && !sub.allowed) {
+            failAt = b;
+            failResource = "tool_calls";
+            failMessage = sub.message ?? "worker sub-budget exhausted";
+            failIsSubBudget = true;
             break;
           }
         }
@@ -386,11 +404,25 @@ export class ManagerLoop {
             opts.onTool?.(batch[b]!.name, r.output.split("\n")[0]?.slice(0, 100) ?? "");
             this.pushToolResult(batch[b]!.id, batch[b]!.name, r.output);
           }
-          this.pushToolResult(batch[failAt]!.id, batch[failAt]!.name, `BUDGET EXCEEDED: ${failMessage}. No further tool calls are allowed this task.`);
-          return { ...this.finish("budget_exceeded", assistantText), detail: failMessage };
+          // A worker whose own sub-budget is gone degrades gracefully: the
+          // refusal lands as a tool result and the worker finishes its report
+          // with what it has. The SHARED budget still hard-stops the run —
+          // nothing may spend past the task's real limits.
+          const refusalText = failIsSubBudget
+            ? `WORKER BUDGET EXCEEDED: ${failMessage}. Stop calling tools and write your final report with what you have.`
+            : `BUDGET EXCEEDED: ${failMessage}. No further tool calls are allowed this task.`;
+          this.pushToolResult(batch[failAt]!.id, batch[failAt]!.name, refusalText);
+          if (!failIsSubBudget) return { ...this.finish("budget_exceeded", assistantText), detail: failMessage };
+          // Remaining calls in the batch (and the run) go back unanswered;
+          // the model turn that follows sees the refusal and wraps up.
+          for (let b = failAt + 1; b < batch.length; b += 1) {
+            this.pushToolResult(batch[b]!.id, batch[b]!.name, refusalText);
+          }
         }
 
-        const settled = await Promise.all(batch.map(async (call) => ({ call, result: await this.executeTool(call) })));
+        // (A sub-budget refusal above leaves the batch already answered —
+        // refusals as tool results — and skips re-execution here.)
+        const settled = failAt < 0 ? await Promise.all(batch.map(async (call) => ({ call, result: await this.executeTool(call) }))) : [];
         for (const { call, result } of settled) {
           opts.onTool?.(call.name, result.output.split("\n")[0]?.slice(0, 100) ?? "");
           this.pushToolResult(call.id, call.name, result.output);
@@ -468,10 +500,10 @@ export class ManagerLoop {
 
     // ── Skill constraints (Part 38): enforced by the runtime, before the tool runs.
     const constraintBlock = await this.checkSkillConstraints(call.name);
-    if (constraintBlock) return { output: constraintBlock };
-
-    this.deps.budget.record("tool_call");
-    this.deps.events.append("tool_started", { name: call.name, tool_call_id: call.id, args_summary: summarizeArgs(args) });
+    if (constraintBlock) return { output: constraintBlock };      this.deps.budget.record("tool_call");
+      // Sub-budget accounting happens on the check (workerSubBudget path);
+      // nothing extra to record here — the shared pool records as before.
+      this.deps.events.append("tool_started", { name: call.name, tool_call_id: call.id, args_summary: summarizeArgs(args) });
 
     let result;
     try {

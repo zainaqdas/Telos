@@ -74,6 +74,13 @@ interface WorkerSession {
 
 const VALID_ROLES = new Set(Object.keys(ROLES));
 
+/**
+ * Per-worker sub-budget (Scale Batch 5 item 19): bounded share of the shared
+ * pools, reported in the delegation event. Generous enough for a real
+ * investigation; small enough that a runaway worker can't starve the manager.
+ */
+const WORKER_SUB_BUDGET = { maxToolCalls: 30, maxTokens: 120_000 } as const;
+
 /** Write-capable tools stripped from the Manager's registry while workers run in parallel. */
 const WRITE_TOOLS = new Set(["write_file", "edit_file"]);
 
@@ -230,7 +237,11 @@ export class Orchestrator {
 
     const workerId = `w${++this.workerSeq}-${createHash("sha1").update(`${req.role}:${req.question}`).digest("hex").slice(0, 4)}`;
     this.deps.budget.record("worker_spawn");
-    this.deps.events.append("delegation", { workerId, role: req.role, question: req.question.slice(0, 200) });
+    // Per-worker sub-budget (Scale Batch 5 item 19): a bounded share of the
+    // shared pools so a 12-worker build can't starve the manager. Shared
+    // budget stays authoritative — sub-budgets only bound one worker's spend.
+    this.deps.budget.setWorkerBudget(workerId, { maxToolCalls: WORKER_SUB_BUDGET.maxToolCalls, maxTokens: WORKER_SUB_BUDGET.maxTokens });
+    this.deps.events.append("delegation", { workerId, role: req.role, question: req.question.slice(0, 200), sub_budget: WORKER_SUB_BUDGET });
     this.deps.events.append("worker_started", { id: workerId, role: req.role });
 
     const session: WorkerSession = {
@@ -267,6 +278,7 @@ export class Orchestrator {
       // runningWorkers; without this decrement the count ratchets up and the
       // next delegation is refused even when fully sequential.
       this.deps.budget.workerFinished();
+      this.deps.budget.clearWorkerBudget(workerId);
     }
   }
 
@@ -521,6 +533,9 @@ export class Orchestrator {
       cancellation: session.cancellation, // per-worker scope: /stop kills this worker only
       ctx: { ...this.deps.ctx, signal: session.cancellation.signal, cancellation: session.cancellation },
       learner: this.deps.learner,
+      // Per-worker sub-budget (Scale Batch 5 item 19): bounded share checked
+      // at every tool-call boundary, on top of the shared pools.
+      workerSubBudget: { checkToolCall: () => this.deps.budget.checkWorkerToolCall(session.id) },
       workerPromptOverride: {
         text:
           `You are ${session.role}, a task-scoped specialist worker. ${roleSpec.mission}\n\n` +
@@ -544,6 +559,15 @@ export class Orchestrator {
       return this.failed(`worker ${session.id} (${session.role}) stopped by user.`);
     }
     session.cycles = cycle;
+    // Sub-budget accounting: accumulate this cycle's tokens; a worker that
+    // burned through its share stops rather than starving the manager.
+    this.deps.budget.recordWorkerUsage(session.id, result.usage.totalTokens);
+    if (this.deps.budget.workerTokensExhausted(session.id) && !session.done) {
+      this.deps.events.append("failure", { source: "worker_budget", message: `worker ${session.id} exhausted its token sub-budget; closing it out` });
+      this.deps.events.append("worker_completed", { id: session.id, ok: false, stopped: true, reason: "sub_budget_exhausted" });
+      this.sessions.delete(session.id);
+      return this.failed(`worker ${session.id} (${session.role}) exhausted its per-worker token budget after ${cycle} cycle(s).`);
+    }
     let report = parseWorkerReport(result.assistantText);
 
     // Contract enforcement: if the final message carried no structured

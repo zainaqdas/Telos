@@ -23,6 +23,9 @@ import { reduce } from "../events/state.ts";
 import { CompletionGate } from "../gate/gate.ts";
 import { ManagerLoop } from "../manager/loop.ts";
 import { profileRepository } from "../context/profile.ts";
+import { loadConventions } from "../context/conventions.ts";
+import { registerPlanTools } from "../tools/plan-tool.ts";
+import { restRenderMarkdown } from "./rest-render.ts";
 import { StreamPrinter, streamWidth } from "./stream-printer.ts";
 import { loadSkills } from "../skills/loader.ts";
 import { SkillRouter } from "../skills/router.ts";
@@ -117,6 +120,13 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   }
 
   let gate = new CompletionGate(stateStore);
+  // Conventions injection (Scale Batch 5): the repo's own AGENTS.md/TELOS.md
+  // (root + parents) join the system prompt as context; the runtime still
+  // enforces every invariant itself — conventions advise, never authorize.
+  const conventions = loadConventions(opts.projectRoot);
+  if (conventions.files.length > 0) {
+    for (const f of conventions.files) out(`  ⚙ conventions: ${f}`);
+  }
   const ctx = makeContext(opts.projectRoot, { shellTimeoutSeconds: config.runtime.shellTimeoutSeconds, signal: cancellation.signal });
   // Mutable so a cancellation-scope reset can re-issue the live signal.
   /** Images attached this session (Part 51): sent only when the model supports vision. */
@@ -163,6 +173,20 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     await gitSnapshot(opts.projectRoot);
   });
 
+  // Plan tool (Scale Batch 5): set_plan/update_plan write first-class
+  // plan_updated events; the gate audits the plan and turn summaries render it.
+  registerPlanTools(registry, events);
+
+  // Plan render in turn summaries (Scale Batch 5): after each run, the current
+  // plan is printed so the user sees the plot without asking.
+  const renderCurrentPlan = (): void => {
+    const steps = lastPlanStepsFromLog(events);
+    if (steps.length === 0) return;
+    const icons = { pending: "□", in_progress: "◐", done: "■" } as Record<string, string>;
+    out("  plan:");
+    steps.forEach((s, i) => out(`    ${icons[s.status] ?? "□"} ${i + 1}. ${s.text}`));
+  };
+
   // MCP servers (Part 55): user-declared local stdio servers compiled into
   // the same registry. A server that fails to start is a notice, not a crash.
   const mcpClients: McpClient[] = [];
@@ -198,6 +222,8 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     learner,
     repoProfile,
     repoTree,
+    /** AGENTS.md/TELOS.md conventions (Scale Batch 5 item 15). */
+    conventions,
     /** Compaction (Part 68): reducer-informed, threshold-gated (0 disables). */
     compaction: { thresholdTokens: compactionThreshold(modelLimits), eventSource: () => events.readAll() },
     /** Observed-cap learning (Scale Batch 2): truncation updates session limits. */
@@ -449,6 +475,14 @@ export async function runSession(opts: SessionOpts): Promise<number> {
         },
       });
       printer.end();
+      // Markdown rest-render (Scale Batch 5): the raw stream already showed
+      // progress live; the finished answer is re-printed cleanly — fences
+      // get minimal syntax-agnostic highlighting, headings get weight.
+      if (result.assistantText.trim()) {
+        out("");
+        restRenderMarkdown(result.assistantText, { width: isRawSupported ? Number.POSITIVE_INFINITY : streamWidth(process.stdout, process.env) });
+      }
+      renderCurrentPlan();
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);
       out(`\n[${result.status} in ${elapsed}s]`);
       if (result.gate) out(`Gate: ${result.gate.verdict} — ${result.gate.summary}`);
@@ -820,6 +854,23 @@ import { gitSnapshot, gitUndoToSnapshot } from "./session-undo.ts";
 
 function out(text: string): void {
   process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+}
+
+/** Latest plan steps from the event log (LAST plan_updated wins). */
+function lastPlanStepsFromLog(events: EventLog): Array<{ text: string; status: string }> {
+  const all = events.readAll();
+  for (let i = all.length - 1; i >= 0; i -= 1) {
+    const ev = all[i]!;
+    if (ev.kind !== "plan_updated") continue;
+    const steps = ev.data["steps"];
+    if (!Array.isArray(steps)) continue;
+    return steps
+      .map((s) => (typeof s === "object" && s !== null ? (s as Record<string, unknown>) : null))
+      .filter((s): s is Record<string, unknown> => s !== null)
+      .map((s) => ({ text: String(s["text"] ?? ""), status: String(s["status"] ?? "pending") }))
+      .filter((s) => s.text.length > 0);
+  }
+  return [];
 }
 
 function printBanner(config: TelosConfig, taskId: string, limits?: { contextWindow: number; maxOutput: number; observedOutputCap?: number; source: string }): void {
