@@ -26,11 +26,22 @@ INSTALL_DIR="$HOME/.telos"
 MIN_NODE_MAJOR=22
 MIN_NODE_MINOR=18
 TOKEN=""
+UPDATE_ONLY=0
+UNINSTALL=0
 
 # --token flag or TELOS_GITHUB_TOKEN / GITHUB_TOKEN env.
+# --update: refresh an existing checkout (equivalent to a bare re-run, but
+# explicit — and it skips the link step failure if nothing is linked yet).
+# --uninstall: remove the checkout and the linked command.
+# NOTE: every flag must be consumed in THIS loop — the branch checks below
+# run after parsing, when $@ is already empty (the old script checked $1
+# here, which the catch-all shift had already eaten, so --uninstall never
+# fired and the script silently ran a normal install instead).
 while [ $# -gt 0 ]; do
   case "$1" in
     --token) TOKEN="${2:-}"; shift 2 ;;
+    --update) UPDATE_ONLY=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
     *) shift ;;
   esac
 done
@@ -45,7 +56,9 @@ say()  { printf '%s\n' "$*"; }
 fail() { printf 'telos installer: %s\n' "$*" >&2; exit 1; }
 
 # ── uninstall ────────────────────────────────────────────────────────────────
-if [ "${1:-}" = "--uninstall" ]; then
+if [ "$UNINSTALL" -eq 1 ]; then
+  npm unlink -g @zainaqdas/telos >/dev/null 2>&1 || true
+  # Older installs linked under the short name — clean those up too.
   npm unlink -g telos >/dev/null 2>&1 || true
   rm -rf "$INSTALL_DIR"
   say "Telos removed (config in your projects' .project-agent/ dirs was kept)."
@@ -66,6 +79,10 @@ say "✓ Node $NODE_VER"
 command -v git >/dev/null 2>&1 || fail "git not found. Install git first."
 
 # ── clone or update ──────────────────────────────────────────────────────────
+if [ "$UPDATE_ONLY" -eq 1 ] && [ ! -d "$INSTALL_DIR/.git" ]; then
+  fail "--update: no existing checkout at $INSTALL_DIR to update (run without --update to install)."
+fi
+
 if [ -d "$INSTALL_DIR/.git" ]; then
   say "✓ updating existing checkout at $INSTALL_DIR"
   if [ -n "$TOKEN" ]; then
