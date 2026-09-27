@@ -27,6 +27,7 @@ import { loadConventions } from "../context/conventions.ts";
 import { registerPlanTools } from "../tools/plan-tool.ts";
 import { restRenderMarkdown } from "./rest-render.ts";
 import { StreamPrinter, streamWidth } from "./stream-printer.ts";
+import { LineEditor } from "./line-editor.ts";
 import { partitionSteering } from "../manager/steering.ts";
 import { loadSkills } from "../skills/loader.ts";
 import { SkillRouter } from "../skills/router.ts";
@@ -262,10 +263,41 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   if (isRawSupported) {
     stdin.setRawMode(true);
   }
-  let lineBuffer = "";
   let rendering = false;
   const pendingLines: string[] = [];
   let processing = false;
+
+  // Line editor (input-quality fix): cursor-aware editing, real escape-sequence
+  // parsing (arrows/Home/End/Del), ↑/↓ history — zero-dep (session/line-editor.ts).
+  const inputHistory: string[] = [];
+  let historyIndex = -1; // -1 = live draft line
+  let historyDraft = "";
+  const editor = new LineEditor({
+    onEcho: (s) => {
+      if (!rendering) process.stdout.write(s);
+    },
+    historyNav: (dir) => {
+      if (rendering || inputHistory.length === 0) return null;
+      if (dir === 1) {
+        // ↓ toward newer; past the newest returns to the live draft.
+        if (historyIndex === -1) return null;
+        if (historyIndex >= inputHistory.length - 1) {
+          historyIndex = -1;
+          return historyDraft;
+        }
+        historyIndex += 1;
+        return inputHistory[historyIndex] ?? "";
+      }
+      // ↑ toward older; first press remembers the draft being typed.
+      if (historyIndex === -1) {
+        historyDraft = editor.value;
+        historyIndex = inputHistory.length - 1;
+      } else if (historyIndex > 0) {
+        historyIndex -= 1;
+      }
+      return inputHistory[historyIndex] ?? "";
+    },
+  });
 
   printBanner(config, taskId, modelLimits);
   renderBudgetBar(budget);
@@ -276,47 +308,46 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   const prompt = (): void => {
     process.stdout.write(`\n> `);
+    editor.repaint(); // reveal any input buffered while a run was busy
   };
   prompt();
 
   const onKeypress = (buf: Buffer): void => {
-    for (const byte of buf) {
-      if (byte === 0x03) {
-        // Ctrl+C: cancel the running task first; exit if idle or pressed twice.
-        if (manager.isBusy()) {
-          printer.end();
-          cancellation.cancel("user pressed Ctrl+C");
-          out("\n[cancellation signal sent — terminating task and child processes]");
-        } else if (lineBuffer.length > 0) {
-          lineBuffer = "";
-          out("\n[cleared]");
-          prompt();
-        } else {
-          shutdown(0);
-        }
-        return;
+    const res = editor.feed(buf.toString("utf8"));
+    // A paste burst can carry multiple Enters in one chunk: hand every
+    // completed line to handleLine (it queues while busy — nothing is lost).
+    for (const line of editor.takeSubmitted()) {
+      if (line.trim()) {
+        inputHistory.push(line);
+        if (inputHistory.length > 200) inputHistory.shift();
       }
-      if (byte === 0x04) {
+      historyIndex = -1;
+      historyDraft = "";
+      void handleLine(line);
+    }
+    if (res.action === "interrupt") {
+      // Ctrl+C semantics preserved from the legacy parser:
+      // busy → cancel the task; typing → clear the line; idle+empty → exit.
+      if (manager.isBusy()) {
+        printer.end();
+        editor.reset();
+        cancellation.cancel("user pressed Ctrl+C");
+        out("\n[cancellation signal sent — terminating task and child processes]");
+      } else if (editor.value.length > 0) {
+        editor.reset();
+        out("^C");
+        prompt();
+      } else {
         shutdown(0);
-        return;
       }
-      if (byte === 0x0d || byte === 0x0a) {
-        const line = lineBuffer;
-        lineBuffer = "";
-        out("\n"); // drop to a fresh line: the response must never jam onto the prompt
-        void handleLine(line);
-        return;
-      }
-      if (byte === 0x7f || byte === 0x08) {
-        if (lineBuffer.length > 0) lineBuffer = lineBuffer.slice(0, -1);
-        continue;
-      }
-      if (byte < 0x20) continue;
-      lineBuffer += String.fromCharCode(byte);
+      return;
     }
-    if (!rendering) {
-      process.stdout.write(`\r> ${lineBuffer}`);
+    if (res.action === "eof") {
+      shutdown(0);
+      return;
     }
+    // Editing echoes are emitted by the editor itself; no per-chunk redraw
+    // needed anymore (the old `\r> …` repaint is gone with lineBuffer).
   };
 
   if (isRawSupported) {
