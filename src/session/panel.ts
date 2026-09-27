@@ -108,6 +108,8 @@ export class Panel {
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
   /** Serialized frame of the last drawn panel — identical frames skip the write. */
   private lastFrame = "";
+  /** Terminal row (1-based) where the panel's top border currently sits. */
+  private layoutTop = 1;
 
   constructor(opts: PanelOptions) {
     this.opts = opts;
@@ -128,6 +130,7 @@ export class Panel {
     if (!Number.isFinite(w) || !Number.isFinite(h) || h < this.height + 4 || w < 30) return;
     this.installed = true;
     const rows = this.height;
+    this.layoutTop = Math.max(1, h - rows + 1);
     this.writeRaw(
       [
         ANSI.hideCursor,
@@ -198,8 +201,15 @@ export class Panel {
 
   /**
    * Resize (P0): coalesced, then a FULL LAYOUT RESET — reset the scroll
-   * region, re-anchor the transcript position at the new region bottom,
-   * rebuild the panel. No incremental surgery on stale cursor state.
+   * region, ERASE THE OLD PANEL FOOTPRINT, re-anchor the transcript position
+   * at the new region bottom, rebuild the panel. No incremental surgery on
+   * stale cursor state.
+   *
+   * The erase is the part that kills the "stale panel boxes in the
+   * transcript": on a GROW (e.g. 30→40 rows) the old frame's rows remain
+   * visible inside the new scroll region — real terminals preserve them —
+   * and the transcript then scrolls a ghost panel with a stale status value
+   * around forever. Shrink hides the problem (rows clipped), grow exposes it.
    */
   onResize(): void {
     if (!this.installed) return;
@@ -209,8 +219,16 @@ export class Panel {
       if (!this.installed) return;
       const h = this.opts.height();
       const rows = this.height;
+      const seq: string[] = [
+        `\x1b[r`, // free the whole screen first
+        `\x1b[${Math.max(1, this.layoutTop)};1H\x1b[J`, // erase OLD panel footprint → end of screen
+        `\x1b[1;${Math.max(1, h - rows)}r`, // new transcript-only region
+        `\x1b[${Math.max(1, h - rows)};1H`, // park at region bottom = transcript position
+        ANSI.save,
+      ];
+      this.layoutTop = Math.max(1, h - rows + 1);
       this.lastFrame = ""; // force a full redraw even if content is unchanged
-      this.writeRaw(`\x1b[r\x1b[1;${Math.max(1, h - rows)}r\x1b[${Math.max(1, h - rows)};1H${ANSI.save}`);
+      this.writeRaw(seq.join(""));
       this.transcriptSaved = true;
       this.repaintNow();
     }, 80);

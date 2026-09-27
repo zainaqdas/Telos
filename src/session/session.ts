@@ -363,7 +363,10 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   if (isRawSupported) {
     panel.install();
-    stdin.on("resize", () => panel.onResize());
+    // Resize events live on process.stdout (Node translates SIGWINCH there).
+    // The old stdin.on("resize") never fired — resize handling was dead code,
+    // so the panel/scroll-region were never rebuilt after a window resize.
+    process.stdout.on("resize", () => panel.onResize());
     // All transcript output now routes through the panel's scroll region.
     outSink = (text: string): void => {
       panel.print(text.endsWith("\n") || text === "" ? text : `${text}\n`);
