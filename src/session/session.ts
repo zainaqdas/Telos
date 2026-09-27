@@ -276,10 +276,13 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   let historyDraft = "";
   const editor = new LineEditor({
     onEcho: (s) => {
-      // While a run streams, keystrokes must not paint over the output —
-      // input is captured silently and the prompt repaints the buffered line
-      // after the run (prompt() calls editor.repaint()).
-      if (!rendering) process.stdout.write(s);
+      // Panel active: the panel renders the buffer on every keystroke
+      // (setInput below) — editor echo would write at the PANEL cursor
+      // position and corrupt the screen, so it's a no-op. Without the panel:
+      // silence while a run streams (input is captured, prompt repaints it
+      // after the run via prompt() → editor.repaint()).
+      if (panel.active || rendering) return;
+      process.stdout.write(s);
     },
     historyNav: (dir) => {
       if (rendering || inputHistory.length === 0) return null;
@@ -309,13 +312,19 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   // Streamed model text goes through the printer: raw passthrough on a TTY
   // (the terminal wraps), word-boundary wrapping at terminal width otherwise.
-  const printer = new StreamPrinter({ width: isRawSupported ? Number.POSITIVE_INFINITY : streamWidth(process.stdout, process.env) });
+  // On a TTY with the panel active, the printer's output is routed through
+  // the panel (DECRC → write in region → re-save); writing straight to stdout
+  // would land at the panel cursor BELOW the scroll region.
+  const printer = new StreamPrinter({
+    width: isRawSupported ? Number.POSITIVE_INFINITY : streamWidth(process.stdout, process.env),
+    write: isRawSupported ? (s) => panel.writeTranscript(s) : undefined,
+  });
   // Contained thinking window (v0.1.8): reasoning renders in a fixed-height
   // box that always shows the LATEST thinking — long reasoning scrolls out of
   // the BOX, never the screen — and is erased when the answer starts. Pipe
   // mode keeps the old dimmed passthrough (linear logs).
   const thinkingWindow = new ThinkingWindow({
-    write: (s) => process.stdout.write(s),
+    write: isRawSupported ? (s) => panel.writeTranscript(s) : (s) => process.stdout.write(s),
     width: isRawSupported ? streamWidth(process.stdout, process.env) : Number.POSITIVE_INFINITY,
   });
   // Activity spinner (v0.1.8): the model's latency before the first token no
@@ -361,9 +370,12 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     // A paste burst can carry multiple Enters in one chunk: hand every
     // completed line to handleLine (it queues while busy — nothing is lost).
     for (const line of editor.takeSubmitted()) {
+      // Echo the sent line into the transcript (the panel box clears itself;
+      // without this the submitted text vanishes from the record).
       if (line.trim()) {
         inputHistory.push(line);
         if (inputHistory.length > 200) inputHistory.shift();
+        panel.print(`> ${line}`);
       }
       historyIndex = -1;
       historyDraft = "";

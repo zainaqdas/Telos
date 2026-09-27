@@ -6,29 +6,33 @@
  *   ┌ transcript (scrolls natively, keeps its scrollback) ┐
  *   │ …                                                   │
  *   ├──────────────────────────────────────────────────────┤
- *   │ status line: budget · model · elapsed               │  ← panel, stuck
- *   │ > input box (line editor renders INSIDE the box)    │     to the bottom
+ *   │ status line: budget · model · tools                 │  ← panel, stuck
+ *   │ > input box (the line editor renders INSIDE)        │     to the bottom
+ *   │ hint row                                            │
  *   └──────────────────────────────────────────────────────┘
  *
- * Transcript lines are printed by moving the cursor into the scroll region
- * (saved cursor position → cursor to region → write → restore). The panel
- * never scrolls away because it lives BELOW the scroll region — the terminal
- * itself re-renders it at the bottom regardless of how much scrolls above.
- * TTY-only: piped sessions keep linear output (panel is never installed).
+ * Cursor model (the invariant that makes this work):
+ *   - After every panel repaint the REAL cursor is parked inside the panel,
+ *     at the editor position, and a DECSC (\x1b7) has saved the transcript
+ *     write position (end of the last transcript write, inside the region).
+ *   - Any transcript write first DECRCs (\x1b8) back to that position, writes
+ *     raw text (the region wraps/scrolls it), then schedules a panel repaint
+ *     which re-saves. Streaming deltas therefore land exactly where the last
+ *     one ended — no per-delta jump-to-row, no overwriting the panel.
+ *   - The panel is BELOW the scroll region, so scrolling transcript never
+ *     moves it, and panel repaints never scroll the transcript.
  *
- * Terminal discipline on teardown: leave the alternate... no — we never use
- * the alternate screen (scrollback is preserved). Teardown just resets
- * scroll region, modes and cursor visibility, and prints a final newline.
+ * TTY-only: when not installed (pipe, tiny/lying terminal), every call
+ * degenerates to plain stdout writes — linear output, zero escapes.
  */
 
 export interface PanelOptions {
   write: (s: string) => void;
-  /** Terminal width/height in cells. */
   width: () => number;
   height: () => number;
-  /** Panel height: 2 (status + input) … 6. Default 3 (status, input, hint). */
+  /** Panel interior rows: 2 (status+input) … 5. Default 3 (+ hint). */
   panelHeight?: number;
-  /** Render the live status line (budget, model, elapsed…). */
+  /** Live status line content (budget, model, tools…). */
   renderStatus: () => string;
 }
 
@@ -39,27 +43,21 @@ const ANSI = {
   reset: "\x1b[0m",
   hideCursor: "\x1b[?25l",
   showCursor: "\x1b[?25h",
+  save: "\x1b7",
+  restore: "\x1b8",
 } as const;
-
-interface BoxLines {
-  status: string;
-  input: string[];
-  cursorCol: number;
-  windowStart: number;
-}
 
 /** Panel layout math (pure, unit-testable). */
 export function panelLines(opts: {
   width: number;
   panelHeight: number;
   input: string;
-  /** Code-point cursor offset into `input`. */
   cursor: number;
   status: string;
   busy: boolean;
-}): BoxLines {
+}): { status: string; input: string[]; cursorCol: number } {
   const w = Math.max(20, opts.width);
-  const h = Math.max(2, Math.min(6, opts.panelHeight));
+  const h = Math.max(2, Math.min(5, opts.panelHeight));
   // Row anatomy: │ + space + content(maxVisible) + space + │ = w visible cols.
   const maxVisible = Math.max(1, w - 4);
 
@@ -72,16 +70,14 @@ export function panelLines(opts: {
 
   const status = truncateVisible(opts.status, maxVisible);
   const statusRow = `${ANSI.dim}│${ANSI.faint} ${status}${" ".repeat(Math.max(0, maxVisible - visibleLen(status)))} ${ANSI.dim}│${ANSI.faint}`;
-
   const inputRow = `${ANSI.dim}│${ANSI.faint} ${visible}${" ".repeat(Math.max(0, maxVisible - [...visible].length))} ${ANSI.dim}│${ANSI.faint}`;
 
   const lines: string[] = [statusRow, inputRow];
   if (h > 2) {
     const hint = opts.busy ? "Ctrl+C cancel · type to queue a steering line" : "Enter send · ↑/↓ history · Ctrl+C exit";
-    const hintRow = `${ANSI.dim}│${ANSI.faint} ${truncateVisible(hint, maxVisible)}${" ".repeat(Math.max(0, maxVisible - visibleLen(hint)))} ${ANSI.dim}│${ANSI.faint}`;
-    lines.push(hintRow);
+    lines.push(`${ANSI.dim}│${ANSI.faint} ${truncateVisible(hint, maxVisible)}${" ".repeat(Math.max(0, maxVisible - visibleLen(hint)))} ${ANSI.dim}│${ANSI.faint}`);
   }
-  return { status: lines[0]!, input: lines.slice(1), cursorCol, windowStart: start };
+  return { status: lines[0]!, input: lines.slice(1), cursorCol };
 }
 
 function visibleLen(s: string): number {
@@ -95,9 +91,11 @@ function truncateVisible(s: string, max: number): string {
 
 export class Panel {
   private readonly opts: PanelOptions;
-  private rows = 0;
   private installed = false;
-  private lastStatus = "";
+  /** DECSC saved? (transcript position is restorable) */
+  private transcriptSaved = false;
+  /** Panel repaint pending via throttle timer? */
+  private repaintTimer: ReturnType<typeof setTimeout> | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: PanelOptions) {
@@ -108,129 +106,71 @@ export class Panel {
     return this.installed;
   }
 
-  /** Panel height in rows (incl. top border). */
+  /** Total panel height in rows, top border included. */
   get height(): number {
-    return Math.max(2, Math.min(6, this.opts.panelHeight ?? 3)) + 1; // + top border
+    return Math.max(2, Math.min(5, this.opts.panelHeight ?? 3)) + 1;
   }
 
-  /**
-   * Install: set the scroll region so the panel area is BELOW it, park the
-   * cursor in the transcript region, and draw the panel.
-   */
   install(): void {
     const w = this.opts.width();
     const h = this.opts.height();
-    // Refuse when the terminal lies (0×0) or is too small for a usable panel:
-    // a broken region is worse than linear output. Output falls through to
-    // plain stdout when not installed.
     if (!Number.isFinite(w) || !Number.isFinite(h) || h < this.height + 4 || w < 30) return;
     this.installed = true;
     const rows = this.height;
     this.writeRaw(
       [
         ANSI.hideCursor,
-        // Scroll region: rows 1..(h - rows). Everything below never scrolls.
-        `\x1b[1;${Math.max(1, h - rows)}r`,
-        // Park cursor inside the scroll region.
-        `\x1b[${Math.max(1, h - rows)};1H`,
+        `\x1b[1;${Math.max(1, h - rows)}r`, // scroll region = transcript only
+        `\x1b[${Math.max(1, h - rows)};1H`, // park transcript cursor at region bottom
+        this.drawPanel(),
+        ANSI.save, // transcript position saved; cursor left in the panel
       ].join(""),
     );
-    this.draw();
+    this.transcriptSaved = true;
   }
 
-  /** Teardown on exit: reset region, show cursor, newline past the panel. */
   teardown(): void {
+    if (this.repaintTimer) clearTimeout(this.repaintTimer);
+    if (this.resizeTimer) clearTimeout(this.resizeTimer);
     if (!this.installed) return;
     this.installed = false;
-    this.writeRaw(
-      [
-        `\x1b[${this.opts.height()};1H`, // bottom of screen
-        ANSI.reset,
-        `\x1b[r`, // reset scroll region
-        ANSI.showCursor,
-        "\n",
-      ].join(""),
-    );
-    if (this.resizeTimer) clearTimeout(this.resizeTimer);
+    this.writeRaw([ANSI.restore, `\x1b[${this.opts.height()};1H`, ANSI.reset, `\x1b[r`, ANSI.showCursor, "\n"].join(""));
   }
 
   /**
-   * Print one transcript line into the scroll region (the panel is untouched:
-   * we jump above it, write, and jump back to the saved panel cursor).
+   * Write raw text into the transcript (streaming deltas included). The text
+   * continues exactly where the previous write ended; the region wraps and
+   * scrolls it. Panel repaint is throttled — deltas arrive in bursts.
    */
-  print(line: string): void {
+  writeTranscript(text: string): void {
     if (!this.installed) {
-      this.opts.write(line.endsWith("\n") || line === "" ? line : `${line}\n`);
+      this.opts.write(text);
       return;
     }
-    const h = this.opts.height();
-    const regionBottom = Math.max(1, h - this.height);
-    const text = line.endsWith("\n") || line === "" ? line : `${line}\n`;
-    // ANSI save/restore is per-screen; the panel cursor lives at the input
-    // row. We re-position explicitly: save → region bottom → text → panel.
-    this.writeRaw(`\x1b7\x1b[${regionBottom};1H${text}\x1b8`);
-    this.drawInput(); // keep input row fresh (col counts can change)
+    const head = this.transcriptSaved ? ANSI.restore : `\x1b[${Math.max(1, this.opts.height() - this.height)};1H`;
+    this.transcriptSaved = false;
+    this.writeRaw(head + text);
+    this.scheduleRepaint();
   }
 
-  /** Refresh the status row (budget bar etc.). Cheap; called on changes. */
-  setStatus(status: string): void {
-    if (!this.installed) return;
-    if (status === this.lastStatus) return;
-    this.lastStatus = status;
-    this.draw();
+  /** Print one complete transcript line (adds \n unless present). */
+  print(line: string): void {
+    this.writeTranscript(line.endsWith("\n") || line === "" ? line : `${line}\n`);
   }
 
-  /** Repaint the input row from the editor's current buffer/cursor. */
-  drawInput(): void {
-    if (!this.installed) return;
-    this.draw();
-  }
-
-  /** Full panel repaint at its fixed screen position. */
-  private draw(): void {
-    if (!this.installed) return;
-    const w = this.opts.width();
-    const h = this.opts.height();
-    const rows = this.height;
-    const top = h - rows + 1; // 1-based row of the panel's top border
-    const view = panelLines({
-      width: w,
-      panelHeight: rows - 1,
-      input: this.inputBuffer,
-      cursor: this.inputCursor,
-      status: this.currentStatus,
-      busy: this.busyFlag,
-    });
-    const parts: string[] = ["\r"];
-    parts.push(`\x1b[${top};1H${ANSI.dim}╭${"─".repeat(Math.max(0, w - 2))}╮${ANSI.faint}`);
-    parts.push(`\x1b[${top + 1};1H${view.status}`);
-    view.input.forEach((row, i) => parts.push(`\x1b[${top + 2 + i};1H${row}`));
-    // Place the terminal cursor at the editor position inside the input row.
-    const cursorRow = top + 2; // panel interior: status, then input row
-    parts.push(`\x1b[${cursorRow};${2 + Math.max(0, view.cursorCol)}H`);
-    this.writeRaw(parts.join(""));
-  }
-
-  // The session feeds the panel the editor state each frame:
-  private inputBuffer = "";
-  private inputCursor = 0;
-  private currentStatus = "";
-  private busyFlag = false;
-
-  /** Called by the session on every editor state change. */
+  /** Editor state changed — repaint the panel immediately (keystroke feel). */
   setInput(buffer: string, cursor: number): void {
     this.inputBuffer = buffer;
     this.inputCursor = cursor;
-    if (this.installed) this.draw();
+    if (this.installed) this.repaintNow();
   }
 
   setBusy(busy: boolean): void {
     if (this.busyFlag === busy) return;
     this.busyFlag = busy;
-    if (this.installed) this.draw();
+    if (this.installed) this.repaintNow();
   }
 
-  /** Handle terminal resize: recompute region + repaint. Debounced. */
   onResize(): void {
     if (!this.installed) return;
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
@@ -238,11 +178,57 @@ export class Panel {
       this.resizeTimer = null;
       const h = this.opts.height();
       const rows = this.height;
+      // Transcript position is stale after a resize; drop the saved one.
       this.writeRaw(`\x1b[r\x1b[1;${Math.max(1, h - rows)}r\x1b[${Math.max(1, h - rows)};1H`);
-      this.lastStatus = "";
-      this.draw();
+      this.transcriptSaved = false;
+      this.repaintNow();
     }, 80);
     if (typeof this.resizeTimer.unref === "function") this.resizeTimer.unref();
+  }
+
+  /** Immediate: save transcript cursor, draw panel, leave cursor in panel. */
+  private repaintNow(): void {
+    if (!this.installed) return;
+    if (this.repaintTimer) {
+      clearTimeout(this.repaintTimer);
+      this.repaintTimer = null;
+    }
+    const seq = [this.transcriptSaved ? "" : "", this.drawPanel(), ANSI.save].join("");
+    this.transcriptSaved = true;
+    this.writeRaw(seq);
+  }
+
+  /** Throttled repaint after transcript writes (bursts of deltas). */
+  private scheduleRepaint(): void {
+    if (this.repaintTimer) return;
+    this.repaintTimer = setTimeout(() => {
+      this.repaintTimer = null;
+      this.repaintNow();
+    }, 30);
+    if (typeof this.repaintTimer.unref === "function") this.repaintTimer.unref();
+  }
+
+  /** Build the panel draw sequence (caller positions/returns the cursor). */
+  private drawPanel(): string {
+    const w = this.opts.width();
+    const h = this.opts.height();
+    const rows = this.height;
+    const top = h - rows + 1;
+    const view = panelLines({
+      width: w,
+      panelHeight: rows - 1,
+      input: this.inputBuffer,
+      cursor: this.inputCursor,
+      status: this.opts.renderStatus(),
+      busy: this.busyFlag,
+    });
+    const parts: string[] = ["\r"];
+    parts.push(`\x1b[${top};1H${ANSI.dim}╭${"─".repeat(Math.max(0, w - 2))}╮${ANSI.faint}`);
+    parts.push(`\x1b[${top + 1};1H${view.status}`);
+    view.input.forEach((row, i) => parts.push(`\x1b[${top + 2 + i};1H${row}`));
+    // Cursor ends inside the input row at the editor position.
+    parts.push(`\x1b[${top + 2};${2 + Math.max(0, view.cursorCol)}H`);
+    return parts.join("");
   }
 
   private writeRaw(s: string): void {
@@ -252,4 +238,9 @@ export class Panel {
       /* panel must never break the session */
     }
   }
+
+  // Editor state fed by the session:
+  private inputBuffer = "";
+  private inputCursor = 0;
+  private busyFlag = false;
 }
