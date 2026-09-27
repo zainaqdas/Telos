@@ -90,7 +90,10 @@ export class FailureLearner {
 
   /** Record a failure. Returns a lesson when one was promoted this time. */
   recordFailure(input: FailureInput): LearnedLesson | null {
-    const key = `${input.tool}:${input.target}`.slice(0, 120);
+    // Recurrence key (P2): tool:category:target — category matters. Without
+    // it, `npm run dev → EADDRINUSE` and `npm run dev → command_not_found`
+    // merge into one "recurring failure" and produce a nonsense lesson.
+    const key = `${input.tool}:${input.category}:${input.target}`.slice(0, 160);
     const { cause, correction } = classifyRootCause(input.category, input.observation);
     const isNew = this.store.add(
       {

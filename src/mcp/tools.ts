@@ -34,7 +34,7 @@ function sanitizeFragment(s: string): string {
 /** Names MCP tools own; external/builtin names can't be shadowed. */
 export const MCP_PREFIX = "mcp_";
 
-export async function registerMcpServer(registry: ToolRegistry, spec: McpServerSpec): Promise<McpRegistration> {
+export async function registerMcpServer(registry: ToolRegistry, spec: McpServerSpec, deps: { cancellation?: { signal?: AbortSignal } } = {}): Promise<McpRegistration> {
   const client = new McpClient(spec.name, spec.command, spec.args, spec.env, spec.timeoutSeconds * 1000);
   const toolNames: string[] = [];
   try {
@@ -43,6 +43,9 @@ export async function registerMcpServer(registry: ToolRegistry, spec: McpServerS
     client.stop();
     return { serverName: spec.name, started: false, tools: [], error: `start failed: ${(err as Error).message}` };
   }
+  // Cancellation lifecycle (P1): the MCP server dies with the task that owns
+  // it — Ctrl+C / /cancel terminates it like any shell child.
+  client.bindCancellation(deps.cancellation?.signal);
   let infos;
   try {
     infos = await client.listTools();
@@ -53,33 +56,63 @@ export async function registerMcpServer(registry: ToolRegistry, spec: McpServerS
   for (const info of infos.slice(0, MAX_TOOLS_PER_SERVER)) {
     const name = `${MCP_PREFIX}${sanitizeFragment(spec.name)}_${sanitizeFragment(info.name)}`;
     if (registry.get(name)) continue; // never shadow anything
-    registry.register(compileMcpTool(name, spec, client, info.name, info.description, info.inputSchema));
+    registry.register(compileMcpTool(name, spec, client, info));
     toolNames.push(name);
   }
   return { serverName: spec.name, started: true, tools: toolNames, client };
+}
+
+/** MCP tool annotations (2025 spec shape, tolerated absent). */
+interface McpAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+function annotationsOf(info: { name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: unknown }): McpAnnotations {
+  const a = info.annotations;
+  return typeof a === "object" && a !== null ? (a as McpAnnotations) : {};
+}
+
+/**
+ * Side-effect classification (P1): map server annotations to the registry's
+ * policy fields instead of blanket "mutative, medium". No annotations ⇒
+ * conservative fallback (mutative — treated like shell). readOnlyHint ⇒
+ * read-only and parallelizable; destructiveHint escalates risk to high.
+ */
+export function classifyMcpTool(info: { name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: unknown }): { permission: "read" | "shell" | "network"; mutative: boolean; risk: "low" | "medium" | "high" } {
+  const a = annotationsOf(info);
+  if (a.readOnlyHint === true) {
+    return { permission: "read", mutative: false, risk: "low" };
+  }
+  if (a.destructiveHint === true) {
+    return { permission: "shell", mutative: true, risk: "high" };
+  }
+  return { permission: "shell", mutative: true, risk: "medium" };
 }
 
 function compileMcpTool(
   registryName: string,
   spec: McpServerSpec,
   client: McpClient,
-  mcpToolName: string,
-  description: string | undefined,
-  inputSchema: Record<string, unknown>,
+  info: { name: string; description?: string; inputSchema: Record<string, unknown>; annotations?: unknown },
 ): ToolDefinition {
   const workerRoles = spec.workerRoles;
-  // MCP tools are user-trusted local commands: medium risk, shell-class.
+  // Side-effect classification (P1): annotations → policy, conservative fallback.
+  const cls = classifyMcpTool(info);
   return {
     name: registryName,
-    description: description ? `[mcp:${spec.name}] ${description}` : `[mcp:${spec.name}] MCP tool ${mcpToolName}`,
-    permission: "shell",
-    mutative: true,
-    risk: "medium",
+    description: info.description ? `[mcp:${spec.name}] ${info.description}` : `[mcp:${spec.name}] MCP tool ${info.name}`,
+    permission: cls.permission,
+    mutative: cls.mutative,
+    risk: cls.risk,
     external: true,
     workerRoles,
-    parameters: normalizeSchema(inputSchema),
+    parameters: normalizeSchema(info.inputSchema),
     async execute(args: Record<string, unknown>, ctx: ToolExecContext): Promise<ToolResult> {
-      const res = await client.callTool(mcpToolName, args);
+      const res = await client.callTool(info.name, args);
       const t = truncateOutput(ctx.redact(res.output), ctx.maxOutputBytes);
       if (!res.ok) {
         return { ok: false, output: `mcp ${registryName} failed: ${res.error ?? t.text}`, errorCategory: "mcp_error" };

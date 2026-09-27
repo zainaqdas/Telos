@@ -38,11 +38,14 @@ export const ROLES: Record<WorkerRole, RoleSpec> = {
   },
   researcher: {
     role: "researcher",
-    allowedTools: ["read_file", "list_directory", "find_files", "search_text"],
+    // Web capability matches the mission (P1): a researcher that answers
+    // "from docs" needs web_search + read_url — the allowlist was narrower
+    // than the role's stated job.
+    allowedTools: ["read_file", "list_directory", "find_files", "search_text", "web_search", "read_url"],
     mission:
-      "Answer questions about external libraries, APIs, and frameworks from the repository's own dependency files and docs; clearly separate what you verified from what you could not.",
+      "Answer questions about external libraries, APIs, and frameworks from the repository's own dependency files, docs, and (when needed) the web; clearly separate what you verified from what you could not.",
     outputContract:
-      `Report with sections: FINDING, EVIDENCE (quote the dependency manifest, doc line, or code you verified), CONFIDENCE (high/medium/low with what remains unverified). ${CITE_SOURCES}`,
+      `Report with sections: FINDING, EVIDENCE (quote the dependency manifest, doc line, URL, or code you verified), CONFIDENCE (high/medium/low with what remains unverified). ${CITE_SOURCES}`,
   },
   reviewer: {
     role: "reviewer",
@@ -54,9 +57,12 @@ export const ROLES: Record<WorkerRole, RoleSpec> = {
   },
   qa: {
     role: "qa",
-    allowedTools: ["read_file", "list_directory", "find_files", "search_text", "run_shell", "git_status", "git_diff"],
+    // Browser verification matches the mission (P1): QA verifies behavior —
+    // web UIs need the browser tools. They are read-only (mutative: false)
+    // so the read-only strip never strips them.
+    allowedTools: ["read_file", "list_directory", "find_files", "search_text", "run_shell", "git_status", "git_diff", "browser_open", "browser_click", "browser_type", "browser_screenshot", "browser_console", "browser_wait"],
     mission:
-      "Reproduce, exercise, and verify behavior. You may run read-mostly shell commands (tests, builds, scripts) but you do NOT modify production source files.",
+      "Reproduce, exercise, and verify behavior. You may run read-mostly shell commands (tests, builds, scripts) and verify web UIs in the headless browser, but you do NOT modify production source files.",
     outputContract:
       "Report with sections: TESTED (what you ran), RESULT (pass/fail with exit codes and output), EVIDENCE (commands + outputs), REMAINING_UNCERTAINTY (what you could not verify).",
   },

@@ -8,7 +8,11 @@ export function reduce(events: AgentEvent[]): TeamState {
   const first = events[0];
   const taskId = first?.taskId ?? "";
   const taskStart = first?.t ?? 0;
-  const startedAt = first ? Date.now() - first.t : Date.now();
+  // Determinism invariant (Part 14): state is derived ONLY from events —
+  // replays at T1 and T2 must produce identical state. Relative-task-time
+  // derivations (waiver deadlines, evidence timestamps) anchor on ev.t,
+  // never on the wall clock of whoever happens to be replaying.
+  const startedAt = taskStart;
 
   const state: TeamState = {
     task: { id: taskId, startedAt, title: "", status: "active" },
@@ -23,6 +27,7 @@ export function reduce(events: AgentEvent[]): TeamState {
     workers: new Map(),
     budget: makeBudget({ tokensUsed: 0, toolCallsUsed: 0, modelCallsUsed: 0, workersSpawned: 0 }, taskStart),
     taskStatus: "active",
+    workspaceVersion: 0,
   };
 
   for (const ev of events) {
@@ -30,6 +35,9 @@ export function reduce(events: AgentEvent[]): TeamState {
   }
   return state;
 }
+
+/** Tools whose SUCCESSFUL completion mutates workspace state (Completion Gate P0). */
+const WORKSPACE_MUTATORS = new Set(["write_file", "edit_file", "append_file"]);
 
 function makeBudget(
   used: { tokensUsed: number; toolCallsUsed: number; modelCallsUsed: number; workersSpawned: number },
@@ -56,7 +64,7 @@ export function apply(state: TeamState, ev: AgentEvent): void {
   switch (ev.kind) {
     case "task_started": {
       state.task.title = str(d["title"]);
-      state.task.startedAt = Date.now() - ev.t;
+      state.task.startedAt = ev.t;
       const limits = obj(d["limits"]);
       state.budget.limits = {
         maxTotalTokens: num(limits["max_total_tokens"], state.budget.limits.maxTotalTokens),
@@ -136,7 +144,9 @@ export function apply(state: TeamState, ev: AgentEvent): void {
       req.evidence.push({
         source: str(d["source"]),
         producer: str(d["producer"]),
-        timestamp: new Date(Date.now() - ev.t).toISOString(),
+        // Deterministic: derive the wall timestamp from the event's own time
+        // offset, never from the replaying process's clock.
+        timestamp: new Date(ev.t).toISOString(),
         fingerprint: optStr(d["fingerprint"]),
         observation: str(d["observation"]),
         valid: true,
@@ -154,6 +164,11 @@ export function apply(state: TeamState, ev: AgentEvent): void {
       state.budget.toolCallsUsed += 1;
       break;
     case "tool_completed":
+      // Workspace version (Completion Gate P0): a monotonic counter of
+      // workspace-mutating tool completions. Verification evidence records
+      // the version it was produced against; the gate refuses to let a
+      // pre-edit test run satisfy a post-edit workspace.
+      if (WORKSPACE_MUTATORS.has(str(d["name"]))) state.workspaceVersion += 1;
       break;
     case "tool_failed":
       break;
@@ -234,10 +249,15 @@ export function apply(state: TeamState, ev: AgentEvent): void {
         const expiresAt = d["expires_at"];
         const ttlHours = d["expires_in_hours"];
         if (typeof expiresAt === "number" && Number.isFinite(expiresAt) && expiresAt > 0) {
+          // Absolute epoch ms supplied by the writer (/waive) — already
+          // deterministic: it is event DATA, not a clock read.
           b.waiverExpiresAt = expiresAt;
         } else if (typeof ttlHours === "number" && Number.isFinite(ttlHours) && ttlHours > 0) {
-          const startedAt = state.task.startedAt || Date.now() - ev.t;
-          b.waiverExpiresAt = startedAt + ev.t + ttlHours * 3_600_000;
+          // Deterministic replay: a TTL waiver is stored as a task-relative
+          // deadline (ms since task start). Consumers that need wall-clock
+          // semantics derive "now" from the task anchor themselves — the
+          // reducer never consults Date.now().
+          b.waiverExpiresT = ev.t + ttlHours * 3_600_000;
         }
       }
       break;

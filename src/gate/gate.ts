@@ -90,10 +90,35 @@ export class CompletionGate {
     }
 
     // Runtime-derived rules (Part 21): the model's prose is not evidence.
-    const MUTATORS = new Set(["write_file", "edit_file"]);
+    const MUTATORS = new Set(["write_file", "edit_file", "append_file"]);
     const wroteWorkspace = events.some((e) => e.kind === "tool_completed" && MUTATORS.has(String(e.data["name"])));
-    const ranVerification = events.some((e) => e.kind === "test_result" || e.kind === "verification_result");
+    // Stale-verification guard (P0): a verification event is only valid if
+    // it ran AFTER the last workspace mutation. edit → test → edit must not
+    // let the pre-edit test run justify the post-edit workspace: the gate
+    // compares each verification event's seq against the last mutator's.
+    let lastMutationSeq = -1;
+    let lastVerificationSeq = -1;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const e = events[i]!;
+      if (e.kind === "tool_completed" && MUTATORS.has(String(e.data["name"]))) {
+        lastMutationSeq = e.seq;
+        break;
+      }
+    }
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const e = events[i]!;
+      if (e.kind === "test_result" || e.kind === "verification_result") {
+        // verification_result of kind rejection_scan is workspace-derived
+        // evidence (it inspects the CURRENT file content at its seq) — it
+        // still must postdate the last mutation, same rule.
+        lastVerificationSeq = e.seq;
+        break;
+      }
+    }
+    const ranVerification = lastVerificationSeq > lastMutationSeq;
     const unverifiedWrites = wroteWorkspace && !ranVerification;
+    const staleVerification = wroteWorkspace && !ranVerification && lastVerificationSeq > -1;
+    const workspaceVersion = state.workspaceVersion;
 
     // A change-requesting instruction that ended in prose with no edits and no
     // verification is not complete — bias toward doing the work. Multi-word
@@ -120,8 +145,20 @@ export class CompletionGate {
     // decision clears them, and objections whose debate verdict is
     // needs_decision block until a decision resolves them — the Manager
     // cannot complete a task past an unresolved disagreement.
-    const openBlockers = state.blockers.filter((b) => b.status === "open" || (b.status === "waived" && b.waiverExpiresAt !== undefined && b.waiverExpiresAt <= Date.now()));
-    const waivedBlockers = state.blockers.filter((b) => b.status === "waived" && !(b.waiverExpiresAt !== undefined && b.waiverExpiresAt <= Date.now()));
+    // Waiver expiry: state derivation is deterministic (Part 14), so the
+    // "now" comparison happens HERE, at query time, not inside the reducer.
+    // Two deadline forms exist: expires_at (absolute epoch ms, event data)
+    // and waiverExpiresT (task-relative ms from expires_in_hours) compared
+    // against the current task-elapsed time.
+    const taskElapsedNow = Date.now() - state.task.startedAt;
+    const waiverLapsed = (b: (typeof state.blockers)[number]): boolean => {
+      if (b.status !== "waived") return false;
+      if (b.waiverExpiresAt !== undefined) return b.waiverExpiresAt <= Date.now();
+      if (b.waiverExpiresT !== undefined) return b.waiverExpiresT <= taskElapsedNow;
+      return false;
+    };
+    const openBlockers = state.blockers.filter((b) => b.status === "open" || waiverLapsed(b));
+    const waivedBlockers = state.blockers.filter((b) => b.status === "waived" && !waiverLapsed(b));
     const undecidedObjections = state.objections.filter((o) => !o.resolved && o.debate?.verdict === "needs_decision");
 
     // Plan audit (Scale Batch 5 item 16): the runtime stores the plan, so the
@@ -143,7 +180,13 @@ export class CompletionGate {
     if (unsatisfied.length) parts.push(`unsatisfied: ${unsatisfied.join(", ")}`);
     if (blocked.length) parts.push(`blocked: ${blocked.join(", ")}`);
     if (invalidated.length) parts.push(`invalidated: ${invalidated.join(", ")}`);
-    if (unverifiedWrites) parts.push("workspace was modified but nothing was run to verify it");
+    if (unverifiedWrites) {
+      parts.push(
+        staleVerification
+          ? `workspace was modified after the last verification (edit at event ${lastMutationSeq} > verification at ${lastVerificationSeq}; workspace v${workspaceVersion}) — re-run tests/build against the current state`
+          : "workspace was modified but nothing was run to verify it",
+      );
+    }
     if (changeRequestedButNotMade) parts.push("instruction requested changes but no workspace change or verification occurred");
     if (planOpen > 0) parts.push(`plan has ${planOpen} unfinished step(s) (${planDone}/${planSteps.length} done) — mark progress with update_plan, or re-scope the plan if it is stale`);
     for (const b of openBlockers) {

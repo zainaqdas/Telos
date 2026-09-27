@@ -48,11 +48,17 @@ export function renderPlan(steps: PlanStep[]): string {
   return steps.map((s, i) => `${icons[s.status]} ${i + 1}. ${s.text}`).join("\n");
 }
 
-export function registerPlanTools(registry: import("./registry.ts").ToolRegistry, events: EventLog): void {
+/** Rebindable event sink: /new points the plan tools at the fresh task log. */
+export interface PlanEventSink {
+  events: EventLog;
+}
+
+export function registerPlanTools(registry: import("./registry.ts").ToolRegistry, events: EventLog, sink?: PlanEventSink): void {
+  const target: PlanEventSink = sink ?? { events };
   const execute = async (args: Record<string, unknown>) => {
     const parsed = parsePlanSteps(args["steps"]);
     if (!parsed.ok) return { ok: false, output: `plan: ${parsed.error}`, errorCategory: "bad_args" as const };
-    events.append("plan_updated", {
+    target.events.append("plan_updated", {
       steps: parsed.steps.map((s) => ({ text: s.text, status: s.status })),
     });
     return {

@@ -12,6 +12,8 @@ import {
  * Ollama (/v1), vLLM, or any base_url implementing chat completions.
  * SSE streaming, incremental tool-call assembly, abort propagation.
  */
+import type { CapabilityState } from "./types.ts";
+
 export class OpenAICompatibleProvider implements Provider {
   readonly name = "openai-compatible";
   private readonly apiKey: string;
@@ -25,9 +27,21 @@ export class OpenAICompatibleProvider implements Provider {
     this.baseUrl = baseUrl;
   }
 
-  capabilities(_model: string): Capabilities {
-    void _model;
-    return { supportsTools: true, supportsVision: true, supportsStreaming: true, supportsStructuredOutput: true, contextLimit: 128_000 };
+  capabilities(model: string): Capabilities {
+    // Capability honesty (P1): the family guarantee is only streaming +
+    // tool-calling on the chat-completions shape. Vision/structured output
+    // vary per endpoint AND per model — claim `unknown` and let the runtime
+    // treat unknown as unsupported for side-effectful sends (images).
+    // Known vision-capable model families get `supported` explicitly.
+    const m = model.toLowerCase();
+    const visionKnown = /gpt-4o|gpt-4\.|gpt-4\.1|gpt-5|o3|o4|gemini|claude|llama-?3\.?2|-vl|vision|qwen.*vl|pixtral/.test(m);
+    return {
+      supportsTools: "supported",
+      supportsVision: visionKnown ? "supported" : "unknown",
+      supportsStreaming: "supported",
+      supportsStructuredOutput: "unknown",
+      contextLimit: 128_000,
+    };
   }
 
   async *stream(req: GenerateRequest, model: string): AsyncIterable<StreamChunk> {

@@ -73,8 +73,8 @@ class FakeProvider implements Provider {
   constructor(vision: boolean) {
     this.vision = vision;
   }
-  capabilities() {
-    return { supportsTools: true, supportsVision: this.vision, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 10_000 };
+  capabilities(): import("../src/providers/types.ts").Capabilities {
+    return { supportsTools: "supported", supportsVision: this.vision ? ("supported" as const) : ("unsupported" as const), supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 10_000 };
   }
   async *stream(req: GenerateRequest, _model: string): AsyncIterable<StreamChunk> {
     void _model;

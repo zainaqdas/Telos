@@ -61,11 +61,19 @@ export interface GenerateRequest {
   signal?: AbortSignal;
 }
 
+/**
+ * Capability states (P1): "OpenAI-compatible" does not guarantee feature
+ * parity. `unknown` means we have no evidence — consumers must treat it as
+ * UNSUPPORTED for anything with side effects (never send an image to a model
+ * whose vision support is unknown) and as best-effort for read paths.
+ */
+export type CapabilityState = "supported" | "unsupported" | "unknown";
+
 export interface Capabilities {
-  supportsTools: boolean;
-  supportsVision: boolean;
-  supportsStreaming: boolean;
-  supportsStructuredOutput: boolean;
+  supportsTools: CapabilityState;
+  supportsVision: CapabilityState;
+  supportsStreaming: CapabilityState;
+  supportsStructuredOutput: CapabilityState;
   contextLimit: number;
 }
 

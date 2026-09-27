@@ -133,20 +133,33 @@ export class BudgetEnforcer {
   }
 
   /**
-   * Cost so far in USD. Provider-reported figures are authoritative; without
-   * them, the user-declared per-Mtok pricing yields an estimate from actual
-   * token counts. null means unknown — never a fabricated number (Part 24).
+   * Cost so far in USD (P2: one number, no double-count). Provider-reported
+   * actual cost WINS when it exists; the declared per-Mtok pricing produces
+   * an ESTIMATE only when no actual figure has been reported. The old
+   * `actual + estimate` sum double-counted every provider-reported token.
+   * null means unknown — never a fabricated number (Part 24).
    */
   get costEstimateUsd(): number | null {
-    if (!this.pricing) return this.costAccumulated;
+    if (this.costAccumulated !== null) return this.costAccumulated;
+    if (!this.pricing) return null;
     const { inputPerMtok, outputPerMtok, cacheReadPerMtok } = this.pricing;
     // Cached tokens bill at the (cheaper) cache-read rate when declared.
     const billedInput = this.state.inputTokens - this.state.cachedTokens;
-    const estimate =
+    return (
       (Math.max(0, billedInput) / 1_000_000) * inputPerMtok +
       (this.state.outputTokens / 1_000_000) * outputPerMtok +
-      (cacheReadPerMtok !== undefined ? (this.state.cachedTokens / 1_000_000) * cacheReadPerMtok : 0);
-    return this.costAccumulated === null ? estimate : this.costAccumulated + estimate;
+      (cacheReadPerMtok !== undefined ? (this.state.cachedTokens / 1_000_000) * cacheReadPerMtok : 0)
+    );
+  }
+
+  /**
+   * Which kind the displayed number is (P2: the UI must never label an
+   * estimate as exact). "actual" = provider-reported; "estimated" = from
+   * declared pricing; null = unknown/no figure at all.
+   */
+  get costBasis(): "actual" | "estimated" | null {
+    if (this.costAccumulated !== null) return "actual";
+    return this.pricing ? "estimated" : null;
   }
 
   workerFinished(): void {
@@ -188,17 +201,27 @@ export class BudgetEnforcer {
     return { allowed: true };
   }
 
-  /** Accumulate reported usage onto a worker's sub-budget (bounded). */
-  recordWorkerUsage(workerId: string, totalTokens: number): void {
+  /**
+   * Accumulate reported usage onto a worker's sub-budget. Accounting parity
+   * with the global budget (P1): the global ceiling counts BILLABLE tokens
+   * (totalTokens − cachedTokens); the sub-budget must count the same thing,
+   * or a worker can look over-budget while the global accounting says it
+   * spent far less (cached reads dominate long contexts).
+   */
+  recordWorkerUsage(workerId: string, totalTokens: number, cachedTokens = 0): void {
     const wb = this.workerBudgets.get(workerId);
     if (!wb) return;
-    wb.usedTokens += totalTokens;
+    wb.usedTokens += Math.max(0, totalTokens - Math.max(0, cachedTokens));
   }
 
-  /** True when the worker has burned through its token sub-budget. */
+  /**
+   * True when the worker has burned through its token sub-budget (P1:
+   * hard-limit semantics — AT the ceiling nothing more is authorized, so a
+   * worker at max cannot authorize another billable operation).
+   */
   workerTokensExhausted(workerId: string): boolean {
     const wb = this.workerBudgets.get(workerId);
-    return wb !== undefined && wb.usedTokens > wb.maxTokens;
+    return wb !== undefined && wb.usedTokens >= wb.maxTokens;
   }
 
   /** /new (Part 61): usage counters start over for the fresh task. */

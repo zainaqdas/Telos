@@ -19,7 +19,7 @@ import type { TelosConfig } from "../src/config/schema.ts";
 
 /** Provider that streams `delays` ms before its (single) text chunk. */
 function scriptedProvider(text: string, delayMs = 0): Provider {
-  const capabilities = () => ({ supportsVision: false, supportsTools: true, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100000 });
+  const capabilities = (): import("../src/providers/types.ts").Capabilities => ({ supportsVision: "unsupported", supportsTools: "supported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100000 });
   return {
     name: "mock",
     capabilities,
@@ -95,7 +95,7 @@ test("tool events carry the model's tool_call_id", async () => {
     registerFilesystemTools(registry);
     const provider: Provider = {
       name: "mock",
-      capabilities: () => ({ supportsVision: false, supportsTools: true, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100000 }),
+      capabilities: () => ({ supportsVision: "unsupported", supportsTools: "supported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100000 }),
       async *stream(): AsyncIterable<StreamChunk> {
         yield { type: "tool_call_delta", toolCall: { id: "call_abc123", name: "read_file", argumentsJson: "{\"path\":\"a.txt\"}" } };
         yield { type: "finish", stopReason: "tool_calls" };
@@ -132,7 +132,7 @@ test("stopWorker cancels one worker's controller without touching session cancel
     let probes = 0;
     const provider: Provider = {
       name: "mock",
-      capabilities: () => ({ supportsVision: false, supportsTools: true, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100000 }),
+      capabilities: () => ({ supportsVision: "unsupported", supportsTools: "supported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100000 }),
       async *stream(_req: GenerateRequest): AsyncIterable<StreamChunk> {
         // Respect abort like a real stream would.
         for (let i = 0; i < 100; i++) {
@@ -184,7 +184,7 @@ test("a session-level cancel still reaches running workers (one-way propagation)
     let sawAbort = false;
     const provider: Provider = {
       name: "mock",
-      capabilities: () => ({ supportsVision: false, supportsTools: true, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100000 }),
+      capabilities: () => ({ supportsVision: "unsupported", supportsTools: "supported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100000 }),
       async *stream(req: GenerateRequest): AsyncIterable<StreamChunk> {
         for (let i = 0; i < 100; i++) {
           if (req.signal?.aborted) { sawAbort = true; throw Object.assign(new Error("aborted"), { name: "AbortError" }); }
@@ -223,7 +223,7 @@ test("setModel switches the manager's model for subsequent calls", async () => {
     const seenModels: string[] = [];
     const provider: Provider = {
       name: "mock",
-      capabilities: () => ({ supportsVision: false, supportsTools: true, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100000 }),
+      capabilities: () => ({ supportsVision: "unsupported", supportsTools: "supported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100000 }),
       async *stream(_req: GenerateRequest, model: string): AsyncIterable<StreamChunk> {
         seenModels.push(model);
         yield { type: "text_delta", text: "ok" };

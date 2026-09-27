@@ -40,8 +40,8 @@ class FakeProvider implements Provider {
   constructor(turns: Array<Array<StreamChunk>>) {
     this.turns = turns;
   }
-  capabilities() {
-    return { supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 10_000 };
+  capabilities(): import("../src/providers/types.ts").Capabilities {
+    return { supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 10_000 };
   }
   async *stream(req: GenerateRequest, _model: string): AsyncIterable<StreamChunk> {
     void _model;

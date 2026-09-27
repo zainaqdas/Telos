@@ -38,8 +38,8 @@ class ScriptedProvider implements Provider {
   constructor(turns: Turn[]) {
     this.turns = turns;
   }
-  capabilities() {
-    return { supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100_000 };
+  capabilities(): import("../../src/providers/types.ts").Capabilities {
+    return { supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100_000 };
   }
   async *stream(_req: GenerateRequest, _model: string): AsyncIterable<StreamChunk> {
     const turn = this.turns[Math.min(this.turn, this.turns.length - 1)]!;
@@ -267,7 +267,7 @@ await scenario("P79 cancellation: cancelled run stops, records task state, contr
     events.append("task_started", { title: "cx", limits: { max_total_tokens: 100_000, max_tool_calls: 10, max_worker_spawns: 0, max_parallel_workers: 0, max_wall_time_seconds: 60 } });
     const provider: Provider = {
       name: "cx",
-      capabilities: () => ({ supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 10_000 }),
+      capabilities: (): import("../../src/providers/types.ts").Capabilities => ({ supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 10_000 }),
       async *stream(req) {
         req.signal?.addEventListener("abort", () => {}, { once: true });
         yield say("starting work...");

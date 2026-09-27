@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, appendFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -105,11 +105,28 @@ export class MemoryStore {
     return true;
   }
 
-  /** Rewrite a kind's file (used for dedup hit-marking; rare, small files). */
+  /**
+   * Rewrite a kind's file (used for dedup hit-marking; rare, small files).
+   * Atomic-replace semantics (P2): the temp file is TRUNCATED freshly on
+   * every rewrite ('w' flag) — append semantics would preserve stale .tmp
+   * content from a previous crash and corrupt the store. The rename is
+   * atomic on the same filesystem, so a crash mid-rewrite leaves either the
+   * old file or the new one, never a half-merged one.
+   */
   private rewriteKind(kind: MemoryKind, list: MemoryRecord[]): void {
     const tmp = this.file(kind) + ".tmp";
-    appendFileSync(tmp, list.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
-    renameSync(tmp, this.file(kind));
+    try {
+      writeFileSync(tmp, list.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf8");
+      renameSync(tmp, this.file(kind));
+    } finally {
+      // If the rename failed, don't leave a stale .tmp behind for the next
+      // run to append onto (the historical bug).
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* rename succeeded — tmp no longer exists */
+      }
+    }
   }
 
   /**

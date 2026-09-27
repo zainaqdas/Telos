@@ -111,7 +111,7 @@ export interface TeamState {
   requirements: Map<string, RequirementRecord>;
   decisions: Array<{ id: string; statement: string; reason?: string; status: "active" | "superseded"; t: number }>;
   objections: Array<{ id: string; statement: string; raisedBy: string; t: number; resolved: boolean; debate?: { verdict: "upheld" | "dismissed" | "needs_decision"; rationale: string } }>;
-  blockers: Array<{ id: string; reason: string; status: "open" | "resolved" | "waived"; t: number; /** Epoch ms after which a user waiver lapses and the blocker is open again (Part 95). */ waiverExpiresAt?: number }>;
+  blockers: Array<{ id: string; reason: string; status: "open" | "resolved" | "waived"; t: number; /** Epoch ms after which a user waiver lapses and the blocker is open again (Part 95). Written into the event (expires_at) — deterministic on replay. */ waiverExpiresAt?: number; /** Task-relative ms deadline derived from expires_in_hours — deterministic on replay; the gate compares it against the current task-elapsed time at evaluation. */ waiverExpiresT?: number }>;
   findings: Array<{ text: string; source: string; t: number }>;
   /** Worker proposals (Part 91): first-class, status tracks correction invalidation. */
   proposals: Map<string, { statement: string; raisedBy: string; status: "active" | "invalidated" | "superseded" | "needs_rework"; t: number }>;
@@ -121,4 +121,7 @@ export interface TeamState {
   budget: BudgetSnapshot;
   taskStatus: TaskStatus;
   endReason?: string;
+  /** Monotonic count of workspace-mutating tool completions. Verification
+   *  evidence produced at version N is stale once the version exceeds N. */
+  workspaceVersion: number;
 }

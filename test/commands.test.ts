@@ -190,8 +190,8 @@ class FakeProvider implements Provider {
     void _model;
     yield { type: "text_delta", text: "ok" };
   }
-  capabilities() {
-    return { supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 10_000 };
+  capabilities(): import("../src/providers/types.ts").Capabilities {
+    return { supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 10_000 };
   }
 }
 void FakeProvider;

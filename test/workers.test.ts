@@ -16,6 +16,7 @@ import { reduce } from "../src/events/state.ts";
 import { FailureLearner } from "../src/memory/pipeline.ts";
 import { Orchestrator } from "../src/workers/orchestrator.ts";
 import { parseWorkerReport, ROLES } from "../src/workers/roles.ts";
+import type { Capabilities } from "../src/providers/types.ts";
 import type { TelosConfig } from "../src/config/schema.ts";
 
 /** Provider that emits the scripted turn for a marker, then converges to prose. */
@@ -26,8 +27,8 @@ class RoleRoutingProvider implements Provider {
   constructor(scripted: Array<{ marker: string; chunks: Array<StreamChunk>; after?: Array<StreamChunk> }>) {
     this.scripted = scripted.map((s) => ({ ...s, after: s.after ?? [{ type: "text_delta", text: "FINDING: no further action." }] }));
   }
-  capabilities() {
-    return { supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100_000 };
+  capabilities(): Capabilities {
+    return { supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100_000 };
   }
   async *stream(req: GenerateRequest, _model: string): AsyncIterable<StreamChunk> {
     void _model;

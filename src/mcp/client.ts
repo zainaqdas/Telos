@@ -16,6 +16,8 @@ export interface McpToolInfo {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  /** MCP tool annotations (readOnlyHint etc.); undefined when the server omits them. */
+  annotations?: unknown;
 }
 
 export interface McpCallResult {
@@ -90,7 +92,7 @@ export class McpClient {
     void result;
   }
 
-  /** List tools exposed by the server. */
+  /** List tools exposed by the server (annotations carried through when the server provides them). */
   async listTools(): Promise<McpToolInfo[]> {
     if (!this.running || !this.initialized) return [];
     const res = (await this.request("tools/list", {})) as { tools?: Array<Record<string, unknown>> };
@@ -98,6 +100,7 @@ export class McpClient {
       name: String(t["name"] ?? ""),
       description: typeof t["description"] === "string" ? t["description"] : undefined,
       inputSchema: (t["inputSchema"] ?? {}) as Record<string, unknown>,
+      annotations: t["annotations"],
     })).filter((t) => t.name);
   }
 
@@ -140,6 +143,22 @@ export class McpClient {
     } catch {
       /* already gone */
     }
+  }
+
+  /**
+   * Cancellation lifecycle (P1): MCP processes participate in the same
+   * cancellation model as shell children. On abort: stop the child (the
+   * server is task-owned), which rejects every pending request through the
+   * exit handler and leaves no orphaned MCP server behind.
+   */
+  bindCancellation(signal?: AbortSignal): void {
+    if (!signal) return;
+    if (signal.aborted) {
+      this.stop();
+      return;
+    }
+    const onAbort = (): void => this.stop();
+    signal.addEventListener("abort", onAbort, { once: true });
   }
 
   // ─── JSON-RPC plumbing ───────────────────────────────────────────────────────

@@ -6,7 +6,7 @@
  *   ┌ transcript (scrolls natively, keeps its scrollback) ┐
  *   │ …                                                   │
  *   ├──────────────────────────────────────────────────────┤
- *   │ status line: budget · model · tools                 │  ← panel, stuck
+ *   │ status line: budget · model · activity               │  ← panel, stuck
  *   │ > input box (the line editor renders INSIDE)        │     to the bottom
  *   │ hint row                                            │
  *   └──────────────────────────────────────────────────────┘
@@ -21,6 +21,12 @@
  *     one ended — no per-delta jump-to-row, no overwriting the panel.
  *   - The panel is BELOW the scroll region, so scrolling transcript never
  *     moves it, and panel repaints never scroll the transcript.
+ *
+ * Single stdout owner (P0): the panel is the ONLY component that emits cursor
+ * control in TTY mode. Spinner/ThinkingWindow are retired to pipe mode only;
+ * activity is STATE here (the activity label in the status row), never another
+ * writer. Repaints are deduped — an identical frame is not rewritten — and
+ * SIGWINCH resets the layout instead of nudging it.
  *
  * TTY-only: when not installed (pipe, tiny/lying terminal), every call
  * degenerates to plain stdout writes — linear output, zero escapes.
@@ -55,6 +61,8 @@ export function panelLines(opts: {
   cursor: number;
   status: string;
   busy: boolean;
+  /** Activity label rendered in the status row (e.g. "◐ thinking 8.4s"). */
+  activity?: string;
 }): { status: string; input: string[]; cursorCol: number } {
   const w = Math.max(20, opts.width);
   const h = Math.max(2, Math.min(5, opts.panelHeight));
@@ -68,7 +76,8 @@ export function panelLines(opts: {
   const visible = chars.slice(start, start + maxVisible).join("");
   const cursorCol = opts.cursor - start;
 
-  const status = truncateVisible(opts.status, maxVisible);
+  const statusWithActivity = opts.activity ? `${opts.status} · ${opts.activity}` : opts.status;
+  const status = truncateVisible(statusWithActivity, maxVisible);
   const statusRow = `${ANSI.dim}│${ANSI.faint} ${status}${" ".repeat(Math.max(0, maxVisible - visibleLen(status)))} ${ANSI.dim}│${ANSI.faint}`;
   const inputRow = `${ANSI.dim}│${ANSI.faint} ${visible}${" ".repeat(Math.max(0, maxVisible - [...visible].length))} ${ANSI.dim}│${ANSI.faint}`;
 
@@ -97,6 +106,8 @@ export class Panel {
   /** Panel repaint pending via throttle timer? */
   private repaintTimer: ReturnType<typeof setTimeout> | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Serialized frame of the last drawn panel — identical frames skip the write. */
+  private lastFrame = "";
 
   constructor(opts: PanelOptions) {
     this.opts = opts;
@@ -134,6 +145,7 @@ export class Panel {
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     if (!this.installed) return;
     this.installed = false;
+    this.lastFrame = "";
     this.writeRaw([ANSI.restore, `\x1b[${this.opts.height()};1H`, ANSI.reset, `\x1b[r`, ANSI.showCursor, "\n"].join(""));
   }
 
@@ -173,15 +185,31 @@ export class Panel {
     if (this.installed) this.repaintNow();
   }
 
+  /**
+   * Activity as STATE (P0): the status row shows what the agent is doing
+   * ("◐ thinking 8.4s", "↻ retry 1/2"). One live status row — a spinner or
+   * thinking box must never write to stdout while the panel is installed.
+   */
+  setActivity(activity: string): void {
+    if (this.activityLabel === activity) return;
+    this.activityLabel = activity;
+    if (this.installed) this.repaintNow();
+  }
+
+  /**
+   * Resize (P0): coalesced, then a FULL LAYOUT RESET — reset the scroll
+   * region, re-anchor the transcript position at the new region bottom,
+   * rebuild the panel. No incremental surgery on stale cursor state.
+   */
   onResize(): void {
     if (!this.installed) return;
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     this.resizeTimer = setTimeout(() => {
       this.resizeTimer = null;
+      if (!this.installed) return;
       const h = this.opts.height();
       const rows = this.height;
-      // The old saved position is stale after a resize: re-anchor at the new
-      // region bottom, save it, repaint the panel at its new coordinates.
+      this.lastFrame = ""; // force a full redraw even if content is unchanged
       this.writeRaw(`\x1b[r\x1b[1;${Math.max(1, h - rows)}r\x1b[${Math.max(1, h - rows)};1H${ANSI.save}`);
       this.transcriptSaved = true;
       this.repaintNow();
@@ -198,7 +226,12 @@ export class Panel {
       clearTimeout(this.repaintTimer);
       this.repaintTimer = null;
     }
-    this.writeRaw(this.drawPanel());
+    const frame = this.drawPanel();
+    // Identical frame (same status, input, cursor, activity): skip the write.
+    // Rapid coalesced events then produce one stable render, not repaint spam.
+    if (frame === this.lastFrame) return;
+    this.lastFrame = frame;
+    this.writeRaw(frame);
   }
 
   /** Throttled repaint after transcript writes (bursts of deltas). */
@@ -224,6 +257,7 @@ export class Panel {
       cursor: this.inputCursor,
       status: this.opts.renderStatus(),
       busy: this.busyFlag,
+      activity: this.activityLabel || undefined,
     });
     const parts: string[] = ["\r"];
     parts.push(`\x1b[${top};1H${ANSI.dim}╭${"─".repeat(Math.max(0, w - 2))}╮${ANSI.faint}`);
@@ -246,4 +280,5 @@ export class Panel {
   private inputBuffer = "";
   private inputCursor = 0;
   private busyFlag = false;
+  private activityLabel = "";
 }

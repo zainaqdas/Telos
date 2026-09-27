@@ -136,8 +136,8 @@ test("createProvider('anthropic') returns the native path; capabilities are per-
   const p = createProvider({ provider: "anthropic", apiKey: "k", baseUrl: "" });
   assert.equal(p.name, "anthropic");
   const caps = p.capabilities("claude-sonnet-4-5");
-  assert.equal(caps.supportsTools, true);
-  assert.equal(caps.supportsVision, true);
+  assert.equal(caps.supportsTools, "supported");
+  assert.equal(caps.supportsVision, "supported");
 });
 
 // ─── Cost estimation (Part 24): computed from declared pricing, never invented ─
@@ -167,7 +167,13 @@ test("config [model.pricing] parses with validation; worker_model is optional", 
   });
   assert.deepEqual(cfg.model.pricing, { inputPerMtok: 3, outputPerMtok: 15 });
   assert.equal(cfg.model.workerModel, "claude-haiku-4-5");
-  assert.throws(() => parseConfig({ model: { provider: "anthropic", pricing: { input_per_mtok: "free", output_per_mtok: 15 } } }), /expected integer/);
+  // Decimal pricing (P2): fractional per-Mtok rates are legal.
+  const cfg2 = parseConfig({
+    model: { provider: "anthropic", pricing: { input_per_mtok: 0.75, output_per_mtok: 2.5, cache_read_per_mtok: 0.1 } },
+    runtime: {},
+  });
+  assert.deepEqual(cfg2.model.pricing, { inputPerMtok: 0.75, outputPerMtok: 2.5, cacheReadPerMtok: 0.1 });
+  assert.throws(() => parseConfig({ model: { provider: "anthropic", pricing: { input_per_mtok: "free", output_per_mtok: 15 } } }), /expected number/);
 });
 
 test("emptyUsage stays cost-null; resetUsage clears accumulated cost", () => {

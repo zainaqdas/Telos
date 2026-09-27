@@ -42,7 +42,7 @@ test("retrieval is trust-ordered, topic-gated, and capped", () => {
   try {
     const s = new MemoryStore(dir);
     s.add({ type: "fact", key: "ts strict", statement: "The repo uses strict TypeScript.", source: "context", verified: true });
-    s.add({ type: "lesson", key: "run_shell:npm run dev", statement: "Before running `npm run dev`, check for an existing server on port 3000.", cause: "port in use", correction: "reuse or kill the existing process", source: "failure_pipeline", verified: true });
+    s.add({ type: "lesson", key: "run_shell:port_in_use:npm run dev", statement: "Before running `npm run dev`, check for an existing server on port 3000.", cause: "port in use", correction: "reuse or kill the existing process", source: "failure_pipeline", verified: true });
     s.add({ type: "rejected_approach", key: "tailwind", statement: "Rejected approach: tailwind", reason: "user prefers plain css", source: "user", verified: true });
     s.add({ type: "user_rule", key: "plain css", statement: "Use plain CSS, not frameworks.", source: "user_instruction", verified: true });
 
@@ -50,7 +50,7 @@ test("retrieval is trust-ordered, topic-gated, and capped", () => {
     const hits = s.query("styling with css", ["user_rule", "lesson", "rejected_approach", "fact"], 5);
     assert.equal(hits[0]?.type, "user_rule");
     assert.ok(hits.some((h) => h.type === "rejected_approach" && h.key === "tailwind"));
-    assert.ok(!hits.some((h) => h.key === "run_shell:npm run dev"));
+    assert.ok(!hits.some((h) => h.key === "run_shell:port_in_use:npm run dev"));
 
     // Cap works.
     const capped = s.query("css styling tailwind server dev", ["user_rule", "lesson", "rejected_approach", "fact"], 2);
@@ -89,11 +89,12 @@ test("first failure records; recurrence promotes to verified lesson", () => {
     const lessons = s.all("lesson");
     assert.equal(lessons.length, 1);
     assert.equal(lessons[0]?.verified, true);
-    assert.equal(lessons[0]?.key, "run_shell:npm run dev");
+    // P2 recurrence key: tool:category:target (category separates causal patterns).
+    assert.equal(lessons[0]?.key, "run_shell:port_in_use:npm run dev");
 
     // Formatting for context.
     const text = learner.formatForContext(learner.retrieveFor("npm run dev keeps failing with port in use"));
-    assert.match(text, /LESSON \(run_shell:npm run dev\)/);
+    assert.match(text, /LESSON \(run_shell:port_in_use:npm run dev\)/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -125,8 +126,8 @@ class FakeProvider implements Provider {
   constructor(turns: Array<Array<StreamChunk>>) {
     this.turns = turns;
   }
-  capabilities() {
-    return { supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 10_000 };
+  capabilities(): import("../src/providers/types.ts").Capabilities {
+    return { supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 10_000 };
   }
   async *stream(_req: GenerateRequest, _model: string): AsyncIterable<StreamChunk> {
     const chunks = this.turns[Math.min(this.turn, this.turns.length - 1)]!;
@@ -203,7 +204,7 @@ test("loop: repeated tool failure across runs promotes a verified lesson", async
     await loop2.run("start the dev server again");
     const lessons = learner.store.all("lesson");
     assert.equal(lessons.length, 1, "recurrence promotes");
-    assert.match(lessons[0]!.key, /run_shell:npm run dev/);
+    assert.match(lessons[0]!.key, /run_shell:[a-z_]+:npm run dev/);
 
     // lesson_verified event recorded.
     const events = new EventLog(join(dir, "ev"), "t");

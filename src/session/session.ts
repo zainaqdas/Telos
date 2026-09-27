@@ -106,9 +106,13 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   } });
 
   // Model catalog (Scale Batch 2): real limits drive the wire max_tokens, the
-  // compaction threshold, and the banner. The limits object is mutable — an
-  // observed output cap (gateway truncation) updates it for this session.
-  const modelLimits = resolveModelLimits(config.model.name);
+  // compaction threshold, and the banner. SINGLE SOURCE OF TRUTH (P0): the
+  // session owns this object; an observed output cap (gateway truncation)
+  // REPLACES it via noteObservedCap's return value and every consumer —
+  // compaction threshold, request max_tokens, banner — reads the live state.
+  // The old code called noteObservedCap and discarded the result, so the
+  // learned cap never reached the runtime.
+  let modelLimits = resolveModelLimits(config.model.name);
   effectiveMaxOutput(modelLimits); // sanity: never throws, warms shape
 
   // Context Engine (Phase 2): focused repo profile injected into the system prompt.
@@ -179,7 +183,9 @@ export async function runSession(opts: SessionOpts): Promise<number> {
 
   // Plan tool (Scale Batch 5): set_plan/update_plan write first-class
   // plan_updated events; the gate audits the plan and turn summaries render it.
-  registerPlanTools(registry, events);
+  // The sink is rebindable so /new redirects plan writes to the fresh log.
+  const planEventSink: { events: EventLog } = { events };
+  registerPlanTools(registry, events, planEventSink);
 
   // Plan render in turn summaries (Scale Batch 5): after each run, the current
   // plan is printed so the user sees the plot without asking.
@@ -199,7 +205,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     const mcpParsed = parseMcpServers(mcpRoot);
     for (const e of mcpParsed.errors) out(`  ⚙ mcp config error: ${e}`);
     for (const spec of mcpParsed.specs) {
-      const reg = await registerMcpServer(registry, spec);
+      const reg = await registerMcpServer(registry, spec, { cancellation });
       if (reg.started && reg.client) {
         out(`  ⚙ mcp server '${reg.serverName}': ${reg.tools.length} tool(s)${reg.tools.length ? ` (${reg.tools.join(", ")})` : ""}`);
         mcpClients.push(reg.client);
@@ -230,12 +236,25 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     conventions,
     /** Compaction (Part 68): reducer-informed, threshold-gated (0 disables). */
     compaction: { thresholdTokens: compactionThreshold(modelLimits), eventSource: () => events.readAll() },
+    /**
+     * Observed output cap accessor (P0): when a gateway truncates completions,
+     * future requests clamp max_tokens just above the observed cap so the
+     * provider's real ceiling — not the config wish — governs the wire.
+     */
+    observedOutputCap: () => modelLimits.observedOutputCap,
     /** Observed-cap learning (Scale Batch 2): truncation updates session limits. */
     onObservedOutputCap: (outputTokens: number) => {
       const before = effectiveMaxOutput(modelLimits);
-      noteObservedCap(modelLimits, outputTokens);
+      // Persist the RETURNED limits — noteObservedCap is pure; ignoring its
+      // result was the bug that made cap learning a no-op.
+      modelLimits = noteObservedCap(modelLimits, outputTokens);
       const after = effectiveMaxOutput(modelLimits);
-      if (after < before) out(`  ℹ provider output cap observed: ~${after} tokens (completions truncated) — compaction adjusted`);
+      if (after < before) {
+        // Push the new threshold into the live manager (compaction fires on
+        // the effective context, not the stale startup value).
+        manager.updateCompactionThreshold(compactionThreshold(modelLimits));
+        out(`  ℹ provider output cap observed: ~${after} tokens (completions truncated) — compaction adjusted`);
+      }
     },
     /** Mid-turn steering (Scale Batch 4): the loop polls this at every
      *  tool-call boundary; queued user lines join the context immediately.
@@ -319,19 +338,16 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     width: isRawSupported ? Number.POSITIVE_INFINITY : streamWidth(process.stdout, process.env),
     write: isRawSupported ? (s) => panel.writeTranscript(s) : undefined,
   });
-  // Contained thinking window (v0.1.8): reasoning renders in a fixed-height
-  // box that always shows the LATEST thinking — long reasoning scrolls out of
-  // the BOX, never the screen — and is erased when the answer starts. Pipe
-  // mode keeps the old dimmed passthrough (linear logs).
+  // Contained thinking window (v0.1.8): PIPE MODE ONLY (P0: single stdout
+  // owner). On a TTY the panel's activity label shows liveness — a second
+  // cursor-writing system (\x1b[s/\x1b[u saves) fought the panel's DECSC
+  // slot and corrupted the transcript; its visual role is retired.
   const thinkingWindow = new ThinkingWindow({
-    write: isRawSupported ? (s) => panel.writeTranscript(s) : (s) => process.stdout.write(s),
-    width: isRawSupported ? streamWidth(process.stdout, process.env) : Number.POSITIVE_INFINITY,
+    write: (s) => process.stdout.write(s),
+    width: Number.POSITIVE_INFINITY,
   });
-  // Activity spinner (v0.1.8): the model's latency before the first token no
-  // longer looks like a hang. Started per run, stopped at first visible token.
-  // The spinner stays for pipe mode; on a TTY the panel's live status line
-  // plays that role (an animating frame below the scroll region would fight
-  // the panel repaints).
+  // Activity spinner (v0.1.8): PIPE MODE ONLY (P0: single stdout owner).
+  // On a TTY the panel's activity state ("◐ thinking 8.4s") plays that role.
   const spinner = new Spinner({ write: (s) => process.stdout.write(s) });
 
   // Docked input panel (v0.1.8, Pi/Hermes-style): TTY-only. The terminal's
@@ -354,7 +370,10 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     };
   }
   printBanner(config, taskId, modelLimits);
-  renderBudgetBar(budget);
+  // P0 (one budget display): on a TTY the panel's live status row IS the
+  // budget display — a printed bar would scroll into the transcript as a
+  // stale duplicate. Pipe mode keeps the linear bar.
+  if (!panel.active) renderBudgetBar(budget);
 
   const prompt = (): void => {
     // The panel IS the prompt on a TTY; nothing to print. On a pipe, keep
@@ -430,18 +449,59 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     outSink = (text: string): void => {
       process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
     };
-    panel.teardown(); // restore scroll region + cursor before final output
-    void closeBrowserSession(); // no orphaned browser (same discipline as shell children)
-    closeMcpClients(mcpClients); // MCP servers die with the session
-    stateStore.dispose(); // release the append listener
-    cancellation.cancel("session shutdown");
-    // Only record cancellation if the task did not already complete —
-    // a completed task must not also be marked cancelled in the log.
-    const alreadyCompleted = events.readAll().some((e) => e.kind === "task_completed");
-    if (!alreadyCompleted) events.append("task_cancelled", { reason: "session ended" });
-    out(`\nevent log: ${events.file}`);
+    // Terminal restoration is FIRST and cannot be skipped by a later failure
+    // (P2 shutdown ordering): every step after it is individually guarded so
+    // an exception in teardown (browser kill, MCP kill, even log append)
+    // can never leave raw mode on or the scroll region broken.
+    try {
+      panel.teardown(); // restore scroll region + cursor before final output
+    } catch {
+      /* terminal already restored or teardown failed — nothing more to do */
+    }
+    try {
+      void closeBrowserSession(); // no orphaned browser (same discipline as shell children)
+    } catch {
+      /* browser cleanup must never block shutdown */
+    }
+    try {
+      closeMcpClients(mcpClients); // MCP servers die with the session
+    } catch {
+      /* MCP cleanup must never block shutdown */
+    }
+    try {
+      stateStore.dispose(); // release the append listener
+    } catch {
+      /* store disposal must never block shutdown */
+    }
+    try {
+      cancellation.cancel("session shutdown");
+      // Only record cancellation if the task did not already complete —
+      // a completed task must not also be marked cancelled in the log.
+      const alreadyCompleted = events.readAll().some((e) => e.kind === "task_completed");
+      if (!alreadyCompleted) events.append("task_cancelled", { reason: "session ended" });
+    } catch {
+      /* event recording must never block shutdown */
+    }
+    try {
+      out(`\nevent log: ${events.file}`);
+    } catch {
+      /* final line is cosmetic */
+    }
     process.exit(code);
   };
+
+  // Shutdown hardening (P2): an uncaught error (or unhandled rejection) must
+  // still restore the terminal — raw mode + scroll regions survive the crash
+  // otherwise and leave every subsequent shell command corrupted.
+  process.on("uncaughtException", (err) => {
+    shutdown(1);
+    // Defensive: if shutdown's own sync path threw before exit, log once.
+    process.stderr.write(`telos: fatal: ${err?.message ?? err}\n`);
+  });
+  process.on("unhandledRejection", (reason) => {
+    shutdown(1);
+    process.stderr.write(`telos: unhandled rejection: ${String(reason).slice(0, 300)}\n`);
+  });
 
   const handleLine = async (line: string): Promise<void> => {
     const trimmed = line.trim();
@@ -547,9 +607,17 @@ export async function runSession(opts: SessionOpts): Promise<number> {
           stateStore.attach(fresh);
           gate = new CompletionGate(stateStore);
           manager.attachEvents(fresh);
-          stateStore.attach(fresh);
           orchestrator.attachEvents(fresh);
           budget.resetUsage();
+          // /new rebind completeness (P2): the skill router and plan tools
+          // close over the EventLog — without rebinding, activated-skill
+          // dedup and set_plan/update_plan would keep writing to the OLD
+          // task's log, splitting the event source of truth.
+          skillRouter.attachEvents(fresh);
+          planEventSink.events = fresh;
+          // A fresh task starts with a clean workspace-version count: the
+          // reducer derives it per log, and stale verification from the old
+          // task must not leak into the new one.
         },
       });
       prompt();
@@ -566,7 +634,14 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     const started = Date.now();
     lastInstruction = text;
     panel.setBusy(true);
-    if (isRawSupported && !panel.active) spinner.start("thinking");
+    // Activity as STATE (P0): the panel status row shows liveness — no second
+    // writer on a TTY. The spinner/thinking box remain pipe-mode-only.
+    const activity = (label: string): void => {
+      if (panel.active) panel.setActivity(label);
+      else if (!isRawSupported) spinner.start(label.replace(/^.*\\s/, ""));
+    };
+    activity("◐ thinking 0.0s");
+    if (!panel.active && isRawSupported) spinner.start("thinking"); // tiny TTY where the panel declined
     // A previous cancellation must not poison this run: cancel stops the
     // CURRENT task, not the rest of the session (Part 62). The ctx signal is
     // re-issued so network/shell tools track the live scope.
@@ -584,16 +659,28 @@ export async function runSession(opts: SessionOpts): Promise<number> {
             spinner.stop();
             thinkingWindow.end(); // answer begins: erase the thinking box
           }
+          if (panel.active) panel.setActivity(""); // answer text is the liveness now
           printer.push(delta);
         },
         onThinking: (delta) => {
           if (spinner.running) spinner.stop();
-          if (!panel.active) thinkingWindow.push(delta); // panel status shows liveness on TTY
+          if (panel.active) {
+            const secs = ((Date.now() - started) / 1000).toFixed(1);
+            panel.setActivity(`◐ thinking ${secs}s`); // live, deduped by the panel
+          } else {
+            thinkingWindow.push(delta); // pipe: dimmed passthrough
+          }
         },
         onTool: (name, summary) => {
           thinkingWindow.end(); // tool lines must not land inside the box
           printer.newline();
+          if (panel.active) panel.setActivity(`⚙ ${name}`);
           out(`  ⚙ ${name}  ${summary}`);
+        },
+        onRetry: (attempt, max, reason) => {
+          const label = `↻ retry ${attempt}/${max} · ${reason}`;
+          if (panel.active) panel.setActivity(label);
+          else out(`  ${label}`); // structured retry line, pipe + tiny-TTY
         },
       });
       spinner.stop();
@@ -603,10 +690,13 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       out(`\n[${result.status} in ${elapsed}s]`);
       if (result.gate) out(`Gate: ${result.gate.verdict} — ${result.gate.summary}`);
       if (result.detail) out(`detail: ${result.detail}`);
-      renderBudgetBar(budget, orchestrator.waitingWorkerIds().length);
+      // One budget display (P0): the bar is pipe-mode-only; the TTY panel's
+      // status row already carries tokens/tools live.
+      if (!panel.active) renderBudgetBar(budget, orchestrator.waitingWorkerIds().length);
     } finally {
       rendering = false;
       panel.setBusy(false);
+      panel.setActivity("");
       prompt();
     }
   };
@@ -719,7 +809,12 @@ async function handleSlashCommand(
         `waiting    ${waiting.length ? waiting.join(", ") : "(none)"}`,
         `collab     proposals ${activeProposals} active / ${needsRework} needs-rework · blockers ${openBlockers} open · objections ${openObjections} unresolved`,
         `wall time  ${Math.round((Date.now() - u.startedAt) / 1000)}s / ${l.maxWallTimeSeconds}s`,
-        ...(deps.budget.costEstimateUsd !== null ? [`cost est.  $${deps.budget.costEstimateUsd.toFixed(4)}${deps.config.model.pricing ? " (from declared pricing)" : ""}`] : []),
+        // Cost display (P2): the basis is always labeled — a provider-reported
+        // ACTUAL is never confused with a pricing ESTIMATE, and the two are
+        // never summed.
+        ...(deps.budget.costEstimateUsd !== null
+          ? [`cost       $${deps.budget.costEstimateUsd.toFixed(4)}${deps.budget.costBasis === "actual" ? " (provider-reported)" : " (estimated from declared pricing)"}`]
+          : []),
       ].join("\n"));
       return;
     }
@@ -864,7 +959,8 @@ async function handleSlashCommand(
     case "models": {
       const caps = deps.providerCapabilities();
       out(`active provider ${deps.config.model.provider} — capabilities of ${deps.config.model.name || "(unset)"}:`);
-      out(`  tools=${caps.supportsTools ? "yes" : "no"}  vision=${caps.supportsVision ? "yes" : "no"}  streaming=${caps.supportsStreaming ? "yes" : "no"}  structured=${caps.supportsStructuredOutput ? "yes" : "no"}  context=${caps.contextLimit}`);
+      const cap = (c: import("../providers/types.ts").CapabilityState): string => (c === "supported" ? "yes" : c === "unsupported" ? "no" : "unknown");
+      out(`  tools=${cap(caps.supportsTools)}  vision=${cap(caps.supportsVision)}  streaming=${cap(caps.supportsStreaming)}  structured=${cap(caps.supportsStructuredOutput)}  context=${caps.contextLimit}`);
       // Live discovery first (Part 52: capability discovery); curated list as
       // honest fallback when the endpoint has no /models route.
       const live = await deps.fetchModels();
@@ -1023,8 +1119,8 @@ function renderBudgetBar(budget: BudgetEnforcer, waitingWorkers = 0): void {
   const toolPct = Math.min(100, Math.round((u.toolCalls / Math.max(1, l.maxToolCalls)) * 100));
   const waitInfo = waitingWorkers > 0 ? ` · waiting: ${waitingWorkers}` : "";
   // Cost appears only when the user declared pricing or the provider reports
-  // it — an estimate is never invented (Part 24).
+  // it — an estimate is never invented (Part 24), and the basis is labeled (P2).
   const cost = budget.costEstimateUsd;
-  const costInfo = cost !== null ? ` · $${cost.toFixed(4)}` : "";
+  const costInfo = cost !== null ? ` · $${cost.toFixed(4)}${budget.costBasis === "estimated" ? " est." : ""}` : "";
   out(`budget: ${tokInfo} · tools ${u.toolCalls}/${l.maxToolCalls} (${toolPct}%)${costInfo}${waitInfo}`);
 }

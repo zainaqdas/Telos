@@ -28,8 +28,8 @@ class ScriptedProvider implements Provider {
   constructor(turns: Array<Array<StreamChunk>>) {
     this.turns = turns;
   }
-  capabilities() {
-    return { supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100_000 };
+  capabilities(): import("../src/providers/types.ts").Capabilities {
+    return { supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100_000 };
   }
   async *stream(req: GenerateRequest, _model: string): AsyncIterable<StreamChunk> {
     void _model;
@@ -291,7 +291,7 @@ test("write tools are stripped from the manager registry while a worker runs, th
     let sawStripped: boolean | undefined;
     const stripProvider: Provider = {
       name: "fake",
-      capabilities: () => ({ supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100_000 }),
+      capabilities: () => ({ supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100_000 }),
       async *stream() {
         sawStripped = registry.get("edit_file") === undefined && registry.get("write_file") === undefined;
         yield { type: "text_delta", text: "FINDING: checked" };
@@ -458,7 +458,7 @@ test("parallel delegations keep write tools stripped until the last worker finis
     let peak = 0;
     const provider: Provider = {
       name: "fake",
-      capabilities: () => ({ supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100_000 }),
+      capabilities: () => ({ supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100_000 }),
       async *stream() {
         active += 1;
         peak = Math.max(peak, active);
@@ -491,23 +491,29 @@ test("parallel delegations keep write tools stripped until the last worker finis
 
 // ─── Phase 9: waiver expiry ───────────────────────────────────────────────────
 
-test("waiver with expires_in_hours re-opens the blocker at the gate after the deadline", () => {
-  // Long TTL: waived stays waived.
+test("waiver deadlines re-open the blocker at the gate after expiry", () => {
+  // /waive writes an ABSOLUTE expires_at (Date.now() + ttl at issuance) —
+  // event data, deterministic on replay (the reducer never reads the clock).
   const future = ev(1, "blocker", { id: "b-1", reason: "staging db not reachable" });
-  const waived = ev(2, "blocker_waived", { id: "b-1", reason: "known outage", expires_in_hours: 24 });
+  const waived = ev(2, "blocker_waived", { id: "b-1", reason: "known outage", expires_at: Date.now() + 24 * 3_600_000 });
   const gateFuture = new CompletionGate(() => [future, waived]);
   const report = gateFuture.evaluate();
   assert.equal(report.verdict, "COMPLETE");
   assert.ok(report.summary.includes("waived by user: b-1"), `waived listed: ${report.summary}`);
 
-  // Expired: same events, but the absolute deadline has passed (the exact
-  // shape the /waive command writes — Date.now() + ttl at issuance).
-  const deadline = Date.now() + 24 * 3_600_000;
-  const expired = ev(2, "blocker_waived", { id: "b-1", reason: "known outage", expires_at: deadline - 25 * 3_600_000 });
+  // Expired: same shape, but the absolute deadline has passed.
+  const expired = ev(2, "blocker_waived", { id: "b-1", reason: "known outage", expires_at: Date.now() - 3_600_000 });
   const state2 = reduce([future, expired]);
   assert.equal(state2.blockers[0]?.status, "waived");
   const gateExpired = new CompletionGate(() => [future, expired]);
   const r2 = gateExpired.evaluate();
   assert.equal(r2.verdict, "BLOCKED", "expired waiver must block again");
   assert.ok(r2.summary.includes("waiver expired"), `summary names expiry: ${r2.summary}`);
+
+  // Legacy relative TTL (expires_in_hours): stored as a task-relative
+  // deadline (waiverExpiresT) — deterministic on replay. The gate compares
+  // it against task-elapsed time.
+  const ttl = ev(2, "blocker_waived", { id: "b-1", reason: "known outage", expires_in_hours: 24 });
+  const state3 = reduce([future, ttl]);
+  assert.equal(state3.blockers[0]?.waiverExpiresT, ttl.t + 24 * 3_600_000, "task-relative deadline is deterministic");
 });

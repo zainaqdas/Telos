@@ -42,8 +42,8 @@ class ScriptedProvider implements Provider {
   constructor(turns: Turn[]) {
     this.turns = turns;
   }
-  capabilities() {
-    return { supportsTools: true, supportsVision: false, supportsStreaming: true, supportsStructuredOutput: false, contextLimit: 100_000 };
+  capabilities(): import("../../src/providers/types.ts").Capabilities {
+    return { supportsTools: "supported", supportsVision: "unsupported", supportsStreaming: "supported", supportsStructuredOutput: "unsupported", contextLimit: 100_000 };
   }
   async *stream(_req: GenerateRequest, _model: string): AsyncIterable<StreamChunk> {
     const turn = this.turns[Math.min(this.turn, this.turns.length - 1)]!;

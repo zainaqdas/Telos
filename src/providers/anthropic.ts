@@ -42,20 +42,29 @@ export class AnthropicProvider implements Provider {
 
   capabilities(model: string): Capabilities {
     const m = model.toLowerCase();
-    // All current Claude models (3.x/4.x families) are tool-, vision-, and
-    // streaming-capable; unknown model strings default to capable rather
-    // than silently disabling features.
-    void m;
+    // Anthropic family defaults (P1: provider default + model honesty). All
+    // Claude 3+/4.x models are tool- and streaming-capable, and vision is
+    // family-wide — but an UNKNOWN model string gets `unknown` rather than
+    // an invented guarantee; only recognized families assert support.
+    const knownClaude = /claude/.test(m);
+    const claude3Plus = /claude-(?:3|4|opus|sonnet|haiku)/.test(m);
     return {
-      supportsTools: true,
-      supportsVision: true,
-      supportsStreaming: true,
-      supportsStructuredOutput: false,
+      supportsTools: knownClaude ? "supported" : "unknown",
+      supportsVision: claude3Plus ? "supported" : knownClaude ? "unknown" : "unknown",
+      supportsStreaming: knownClaude ? "supported" : "unknown",
+      supportsStructuredOutput: "unsupported",
       contextLimit: 200_000,
     };
   }
 
   async *stream(req: GenerateRequest, model: string): AsyncIterable<StreamChunk> {
+    // Request-local usage state (P0): input/cache tokens arrive on
+    // message_start and are consumed on message_delta. These MUST live in
+    // the stream() frame, not on the provider instance — the same provider
+    // object serves concurrent streams (manager + workers, parallel
+    // delegations) and instance fields cross-contaminate their usage.
+    let pendingInputTokens = 0;
+    let pendingCachedTokens = 0;
     const body = encodeRequest(req, model, {
       signal: req.signal,
       maxTokens: req.maxTokens ?? 4096,
@@ -155,10 +164,10 @@ export class AnthropicProvider implements Provider {
             yield {
               type: "usage",
               usage: {
-                inputTokens: this.pendingInputTokens,
+                inputTokens: pendingInputTokens,
                 outputTokens: numberOr(usage["output_tokens"], 0),
-                cachedTokens: this.pendingCachedTokens,
-                totalTokens: this.pendingInputTokens + numberOr(usage["output_tokens"], 0),
+                cachedTokens: pendingCachedTokens,
+                totalTokens: pendingInputTokens + numberOr(usage["output_tokens"], 0),
                 modelCalls: 1,
                 toolCalls: 0,
                 costUsd: null,
@@ -168,8 +177,8 @@ export class AnthropicProvider implements Provider {
         } else if (type === "message_start") {
           const message = (ev["message"] ?? {}) as Record<string, unknown>;
           const usage = (message["usage"] ?? {}) as Record<string, unknown>;
-          this.pendingInputTokens = numberOr(usage["input_tokens"], 0);
-          this.pendingCachedTokens = numberOr(usage["cache_read_input_tokens"], 0);
+          pendingInputTokens = numberOr(usage["input_tokens"], 0);
+          pendingCachedTokens = numberOr(usage["cache_read_input_tokens"], 0);
         } else if (type === "error") {
           const err = (ev["error"] ?? {}) as Record<string, unknown>;
           throw new ProviderError(`anthropic stream error: ${String(err["message"] ?? type)}`, undefined, true);
@@ -196,13 +205,9 @@ export class AnthropicProvider implements Provider {
       if (req.signal) req.signal.removeEventListener("abort", onExternalAbort);
     }
   }
-
-  // message_start carries input_tokens; message_delta carries output_tokens.
-  private pendingInputTokens = 0;
-  private pendingCachedTokens = 0;
 }
 
-// ─── Request encoding (our normalized model → Anthropic Messages shape) ──────
+// ─── Request encoding (our normalized model → Anthropic shape) ──────────────
 
 export function encodeRequest(req: GenerateRequest, model: string, opts: EncoderDeps): Record<string, unknown> {
   let system = "";

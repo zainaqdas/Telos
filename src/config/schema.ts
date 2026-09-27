@@ -62,6 +62,17 @@ export function expectInt(v: unknown, path: string, opts: { min?: number; max?: 
   return v;
 }
 
+/** Finite non-negative number — decimals allowed (0.75, 2.50, 15.00 …). */
+export function expectNumber(v: unknown, path: string, opts: { min?: number; fallback?: number } = {}): number {
+  if (v === undefined) {
+    if (opts.fallback !== undefined) return opts.fallback;
+    throw new ConfigError(`${path}: expected number`);
+  }
+  if (typeof v !== "number" || !Number.isFinite(v)) throw new ConfigError(`${path}: expected number`);
+  if (opts.min !== undefined && v < opts.min) throw new ConfigError(`${path}: must be >= ${opts.min}`);
+  return v;
+}
+
 export function expectBool(v: unknown, path: string, fallback: boolean): boolean {
   if (v === undefined) return fallback;
   if (typeof v !== "boolean") throw new ConfigError(`${path}: expected boolean`);
@@ -121,15 +132,15 @@ export interface TelosConfig {
 
 // ─── Normalization ────────────────────────────────────────────────────────────
 
-/** Optional [model.pricing] table: USD per million tokens, user-declared. */
+/** Optional [model.pricing] table: USD per million tokens, user-declared. Decimal pricing (P2): 0.75 / 2.50 / 15.00 are all legal. */
 function parsePricing(model: Record<string, unknown>): { pricing?: { inputPerMtok: number; outputPerMtok: number; cacheReadPerMtok?: number } } {
   const raw = model["pricing"];
   if (raw === undefined) return {};
   const p = expectObject(raw, "model.pricing");
-  const input = expectInt(p["input_per_mtok"], "model.pricing.input_per_mtok", { min: 0 });
-  const output = expectInt(p["output_per_mtok"], "model.pricing.output_per_mtok", { min: 0 });
+  const input = expectNumber(p["input_per_mtok"], "model.pricing.input_per_mtok", { min: 0 });
+  const output = expectNumber(p["output_per_mtok"], "model.pricing.output_per_mtok", { min: 0 });
   if (p["cache_read_per_mtok"] === undefined) return { pricing: { inputPerMtok: input, outputPerMtok: output } };
-  const cache = expectInt(p["cache_read_per_mtok"], "model.pricing.cache_read_per_mtok", { min: 0 });
+  const cache = expectNumber(p["cache_read_per_mtok"], "model.pricing.cache_read_per_mtok", { min: 0 });
   return { pricing: { inputPerMtok: input, outputPerMtok: output, cacheReadPerMtok: cache } };
 }
 

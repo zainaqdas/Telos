@@ -139,4 +139,10 @@ export class SkillRouter {
       });
     }
   }
+
+  /** /new (Part 61): rebind to the fresh task's event log — skill activation
+   *  dedup and checklist registration must follow the CURRENT task. */
+  attachEvents(events: EventLog): void {
+    (this.deps as { events: EventLog }).events = events;
+  }
 }

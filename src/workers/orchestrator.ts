@@ -285,12 +285,25 @@ export class Orchestrator {
   /**
    * Resume a waiting worker with new context (e.g. "the fix is now applied —
    * re-review"). Refuses unknown or already-completed workers.
+   *
+   * Resume budgeting (P1, Option A): a WAITING worker released its parallel
+   * slot and sub-budget when it went waiting (runDelegation's finally). The
+   * resume REACQUIRES both through the normal budget path — a resumed worker
+   * can never bypass maxParallelWorkers or carry a stale sub-budget.
    */
   async continueWorker(workerId: string, update: string): Promise<DelegationResult> {
     const session = this.sessions.get(workerId);
     if (!session) {
       return this.failed(`continue_worker: no waiting worker '${workerId}'. Waiting: ${this.waitingWorkerIds().join(", ") || "none"}.`);
     }
+    // Reacquire the parallel slot through the same hard gate a fresh spawn
+    // passes — waiting must not be a way back in past the ceiling.
+    const spawnVerdict = this.deps.budget.check("worker_spawn");
+    if (!spawnVerdict.allowed) {
+      return this.failed(`continue_worker refused by runtime: ${spawnVerdict.message}. Integrate what you have and proceed yourself.`);
+    }
+    this.deps.budget.record("worker_spawn");
+    this.deps.budget.setWorkerBudget(workerId, { maxToolCalls: WORKER_SUB_BUDGET.maxToolCalls, maxTokens: WORKER_SUB_BUDGET.maxTokens });
     this.deps.events.append("worker_started", { id: workerId, role: session.role, resumed: true, cycle: session.cycles + 1 });
     try {
       const result = await this.runCycle(session, update);
@@ -299,6 +312,11 @@ export class Orchestrator {
       this.deps.events.append("worker_completed", { id: workerId, ok: false });
       this.sessions.delete(workerId);
       return this.failed(`worker ${workerId} failed on resume: ${(err as Error).message}`);
+    } finally {
+      // Symmetric release: the resumed cycle releases its slot + sub-budget,
+      // exactly like a fresh delegation does.
+      this.deps.budget.workerFinished();
+      this.deps.budget.clearWorkerBudget(workerId);
     }
   }
 
@@ -559,9 +577,11 @@ export class Orchestrator {
       return this.failed(`worker ${session.id} (${session.role}) stopped by user.`);
     }
     session.cycles = cycle;
-    // Sub-budget accounting: accumulate this cycle's tokens; a worker that
-    // burned through its share stops rather than starving the manager.
-    this.deps.budget.recordWorkerUsage(session.id, result.usage.totalTokens);
+    // Sub-budget accounting (P1): accumulate this cycle's BILLABLE tokens
+    // (same semantics as the global budget — cached reads excluded); a
+    // worker that burned through its share stops rather than starving the
+    // manager.
+    this.deps.budget.recordWorkerUsage(session.id, result.usage.totalTokens, result.usage.cachedTokens);
     if (this.deps.budget.workerTokensExhausted(session.id) && !session.done) {
       this.deps.events.append("failure", { source: "worker_budget", message: `worker ${session.id} exhausted its token sub-budget; closing it out` });
       this.deps.events.append("worker_completed", { id: session.id, ok: false, stopped: true, reason: "sub_budget_exhausted" });

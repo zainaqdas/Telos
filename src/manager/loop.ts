@@ -6,6 +6,7 @@ import type { ToolRegistry, ToolExecContext } from "../tools/registry.ts";
 import { validateToolArgs } from "../tools/registry.ts";
 import type { BudgetEnforcer } from "../runtime/usage.ts";
 import { RepetitionGuard, fingerprintCall, guardKey, classifyShellFailure, DEFAULT_GUARD_CONFIG } from "../runtime/repetition.ts";
+import { defaultBreakers, type CircuitBreakers, type BreakerCondition } from "../runtime/guards.ts";
 import { compactMessages } from "../runtime/compact.ts";
 import type { CancellationController } from "../runtime/cancellation.ts";
 import type { EventLog } from "../events/log.ts";
@@ -59,6 +60,13 @@ export interface ManagerDeps {
    *  returns truncated so the session can adjust compaction/budget math. */
   onObservedOutputCap?: (outputTokens: number) => void;
   /**
+   * Live observed output cap (P0): when the session has learned that a
+   * gateway truncates completions below the configured max_tokens, new
+   * requests clamp to just above the observed cap (plus headroom for the
+   * closing JSON of a tool call). Keeps ONE effective limit in the runtime.
+   */
+  observedOutputCap?: () => number | undefined;
+  /**
    * Mid-turn steering (Scale Batch 4, Pi's getSteeringMessages pattern): the
    * loop polls this at every tool-call boundary; returned lines join the
    * transcript as user messages BEFORE the next model turn, so a queued
@@ -71,6 +79,14 @@ export interface ManagerDeps {
    * worker can't starve the manager. The shared budget stays authoritative.
    */
   workerSubBudget?: { checkToolCall: () => { allowed: boolean; message?: string } };
+  /**
+   * Circuit breakers (P2 wiring): temporal failure storms. OWNERSHIP —
+   * BudgetEnforcer owns resource ceilings, RepetitionGuard owns identical
+   * repeated actions, CircuitBreakers own broad temporal storms (tool failure
+   * storms, spawn storms, network failure storms). Injected so tests can
+   * supply their own; a default instance is created when absent.
+   */
+  breakers?: CircuitBreakers;
 }
 
 export interface RunOptions {
@@ -82,6 +98,8 @@ export interface RunOptions {
   /** Live chain-of-thought deltas (reasoning_content on OpenAI-compatible providers). */
   onThinking?: (delta: string) => void;
   onTool?: (name: string, argsSummary: string) => void;
+  /** Provider retry progress (P0 UX): transient status, not transcript noise. */
+  onRetry?: (attempt: number, maxAttempts: number, reason: string) => void;
 }
 
 export interface RunResult {
@@ -103,6 +121,7 @@ interface PendingToolCall {
 export class ManagerLoop {
   private readonly messages: Message[] = [];
   private guard: RepetitionGuard;
+  private readonly breakers: CircuitBreakers;
   private readonly deps: ManagerDeps;
   private usage: Usage = emptyUsage();
   private turnStartedAt = 0;
@@ -116,6 +135,7 @@ export class ManagerLoop {
   constructor(deps: ManagerDeps) {
     this.deps = deps;
     this.guard = deps.guard ?? new RepetitionGuard(DEFAULT_GUARD_CONFIG);
+    this.breakers = deps.breakers ?? defaultBreakers();
     this.messages.push({
       role: "system",
       parts: [{ type: "text", text: deps.workerPromptOverride ? deps.workerPromptOverride.text : buildSystemPrompt(deps.config, deps.repoProfile, deps.repoTree, deps.conventions) }],
@@ -160,6 +180,15 @@ export class ManagerLoop {
   compactNow(): { compacted: boolean; removed: number; savedTokens: number } {
     const src = this.deps.compaction?.eventSource ?? (() => []);
     return compactMessages(this.messages, src(), { force: true });
+  }
+
+  /**
+   * Observed-cap learning (P0): the session updates the compaction threshold
+   * mid-task when a gateway's real output cap proves smaller than assumed —
+   * one effective model-limit state, updated in place.
+   */
+  updateCompactionThreshold(thresholdTokens: number): void {
+    if (this.deps.compaction && thresholdTokens > 0) this.deps.compaction.thresholdTokens = thresholdTokens;
   }
 
   /** Run the loop for one user instruction until the Gate rules or limits hit. */
@@ -216,16 +245,19 @@ export class ManagerLoop {
     }
     const prefix = isCorrection ? "CORRECTION — highest priority, supersedes earlier instructions where they conflict: " : "";
     const parts: Array<{ type: "text"; text: string } | { type: "image"; mediaType: string; data: string }> = [{ type: "text", text: `${prefix}${instruction}` }];
-    // Vision gating (Part 51): images are only sent when the provider reports
-    // support for the active model — otherwise the user is told, in-band.
+    // Vision gating (Part 51 + P1 capability honesty): images are only sent
+    // when vision support is AFFIRMATIVELY known — `unknown` is treated as
+    // unsupported for a side-effectful send (a non-vision endpoint 400s on
+    // image blocks and burns the turn).
     const images = opts.images ?? [];
     if (images.length > 0) {
       const vision = this.deps.provider.capabilities(this.deps.model).supportsVision;
-      if (vision) {
+      if (vision === "supported") {
         for (const img of images) parts.push({ type: "image", mediaType: img.mediaType, data: img.data });
       } else {
-        this.pushSystemNotice(`Image input ignored: the active model (${this.deps.model}) does not support vision.`);
-        this.deps.events.append("task_updated", { notice: "image input dropped: model lacks vision support" });
+        const why = vision === "unknown" ? "vision support is unknown for this endpoint/model" : "the active model does not support vision";
+        this.pushSystemNotice(`Image input ignored: ${why} (${this.deps.model}).`);
+        this.deps.events.append("task_updated", { notice: `image input dropped: ${why}` });
       }
     }
     this.messages.push({ role: "user", parts });
@@ -260,11 +292,15 @@ export class ManagerLoop {
       let stopReason = "";
       const toolCalls: PendingToolCall[] = [];
       try {
+        // max_tokens headroom: file writes arrive as one tool-call argument;
+        // a tight cap truncates the JSON mid-string (the model's args become
+        // unsalvageable). The per-task token budget still enforces cost.
+        // P0 (observed cap): an already-learned gateway cap governs the wire
+        // request — asking for more only guarantees another truncation.
+        const learnedCap = this.deps.observedOutputCap?.();
+        const requestMaxTokens = learnedCap !== undefined ? Math.min(this.deps.config.model.maxTokens, learnedCap + 256) : this.deps.config.model.maxTokens;
         const stream = this.deps.provider.stream(
-          // max_tokens headroom: file writes arrive as one tool-call argument;
-          // a tight cap truncates the JSON mid-string (the model's args become
-          // unsalvageable). The per-task token budget still enforces cost.
-          { messages: this.messages, tools: this.deps.registry.specs(), signal: this.deps.cancellation.signal, maxTokens: this.deps.config.model.maxTokens },
+          { messages: this.messages, tools: this.deps.registry.specs(), signal: this.deps.cancellation.signal, maxTokens: requestMaxTokens },
           this.deps.model,
         );
         for await (const chunk of stream) {
@@ -286,16 +322,27 @@ export class ManagerLoop {
           return this.finish("cancelled", assistantText);
         }
         if (err instanceof ProviderError && err.retryable) {
+          // Circuit breaker (P2 wiring): temporal network failure storm.
+          const networkDecision = this.breakers.record("network_failure_storm");
+          if (networkDecision.tripped) {
+            this.deps.events.append("failure", { source: "circuit_breaker", message: `network failure storm: ${networkDecision.detail}` });
+            return { ...this.finish("provider_error", assistantText), detail: `circuit breaker open (network failure storm): ${networkDecision.detail}` };
+          }
           // Retry v2 (Scale Batch 4): up to maxStreamAttempts retries with
           // exponential backoff (±25% jitter) that honors the provider's
           // retry-after hint; every wait is visible and event-logged.
           if (this.streamRetries < this.deps.config.runtime.maxStreamAttempts) {
             this.streamRetries += 1;
             const delay = retryDelayMs(this.streamRetries - 1, err.retryAfterMs);
-            const reason = err.status === 429 ? "rate limit" : err.status ? `HTTP ${err.status}` : "retryable provider error";
+            const reason = err.status === 429 ? "rate limit" : err.status ? `HTTP ${err.status}` : "network error";
             const notice = `provider retrying in ${formatRetryDelay(delay)} (${reason}; attempt ${this.streamRetries}/${this.deps.config.runtime.maxStreamAttempts})`;
             try {
               this.deps.onNotice?.(notice);
+            } catch {
+              /* observers must never break the run */
+            }
+            try {
+              opts.onRetry?.(this.streamRetries, this.deps.config.runtime.maxStreamAttempts, reason);
             } catch {
               /* observers must never break the run */
             }
@@ -446,15 +493,22 @@ export class ManagerLoop {
         try {
           const lines = this.deps.steering.drain();
           if (lines.length > 0) {
-            const notice = `steering: ${lines.length} line(s) injected mid-run — they override the original instruction where they conflict`;
+            // Correction semantics for steering (P0): a mid-run line is the
+            // user's newest word — it gets the SAME state machinery as /correct
+            // (user_correction event → requirement/proposal invalidation in
+            // the reducer), not a text-only injection. The STEERING marker is
+            // kept for in-context precedence framing; the state effect is
+            // identical.
+            for (const line of lines) {
+              this.deps.events.append("user_correction", { text: line, source: "steering" });
+              this.messages.push({ role: "user", parts: [{ type: "text", text: markSteering(line) }] });
+            }
+            const notice = `steering: ${lines.length} line(s) injected mid-run as correction(s) — they override the original instruction where they conflict`;
             this.deps.events.append("task_updated", { notice });
             try {
               this.deps.onNotice?.(notice);
             } catch {
               /* observers must never break the run */
-            }
-            for (const line of lines) {
-              this.messages.push({ role: "user", parts: [{ type: "text", text: markSteering(line) }] });
             }
           }
         } catch {
@@ -553,6 +607,16 @@ export class ManagerLoop {
           : result.errorCategory ?? "tool_error";
       this.deps.events.append("tool_failed", { name: call.name, tool_call_id: call.id, category, message: result.output.slice(0, 300) });
       this.guard.record(key, fingerprint, false, category, Date.now(), call.name);
+      // Circuit breaker (P2 wiring): broad temporal tool-failure storm —
+      // DISTINCT from the RepetitionGuard (identical actions) and from
+      // BudgetEnforcer (resource ceilings). When it trips, the run stops
+      // spending: the environment is failing faster than any single retry
+      // strategy helps.
+      const storm = this.breakers.record("tool_failure_storm");
+      if (storm.tripped) {
+        this.deps.events.append("failure", { source: "circuit_breaker", message: `tool failure storm: ${storm.detail}` });
+        return { output: `CIRCUIT BREAKER OPEN: ${storm.detail}. Too many tool failures in a short window — stop calling tools, report what you have, and surface the failures. This refusal is runtime-enforced.` };
+      }
       // Failure learning pipeline (Part 28): classify, record, promote on recurrence.
       if (this.deps.learner) {
         try {
