@@ -184,3 +184,17 @@ version bump for npm release at milestones (not per batch).
   (`WORKER_SUB_BUDGET`, 30 tool calls / 120k tokens) reported in the delegation event; exhaustion
   degrades the worker gracefully instead of hard-stopping the run — the shared budget remains the
   hard stop (Batch 5).
+- **Budget realism (v0.1.8, live-feedback follow-up):** the token ceiling counts BILLABLE tokens
+  only (cache reads excluded — they dominate every turn after the first) and defaults to UNLIMITED
+  (0); wall clock + tool-call budgets still bound the task. Declared caps remain hard-enforced.
+  Streaming UX: reasoning renders in a contained fixed-height window (latest wins, erased when the
+  answer starts), and a spinner with elapsed seconds covers model latency (TTFT). Connection-level
+  provider failures ("fetch failed", DNS/socket blips) are now retryable instead of instant
+  provider_error.
+- **All budgets opt-in (v0.1.8, user directive):** every budget defaults to UNLIMITED — tokens
+  (billable), tool calls, worker spawns, parallel workers, wall clock — with 0 = unlimited. Any
+  declared cap is hard-enforced before the spend, exactly as before. The safety rules that are not
+  budgets (destructive refusal, repetition guard, evidence gate) are unchanged. UI: docked bottom
+  input panel (DECSTBM scroll region; status line + input box never scroll away; editor renders in
+  the box with horizontal windowing; graceful fallback to the linear prompt on ptys that report no
+  size or are too small).

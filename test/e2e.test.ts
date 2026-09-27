@@ -77,7 +77,9 @@ test("e2e: chat session completes a read-only instruction via mock provider", as
       // never one-line-per-chunk.
       assert.match(stdout, /The file contains a greeting\./);
     assert.match(stdout, /Gate: COMPLETE/);
-    assert.match(stdout, /budget: tokens 18\/80000/);
+    // Default budget is unlimited billable tokens (0): the bar shows the
+    // live billable count (cache reads excluded) instead of a percentage.
+    assert.match(stdout, /budget: tokens \d+ \(no cap\)/);
   } finally {
     child.kill("SIGKILL");
     await new Promise<void>((r) => child.on("exit", () => r()));

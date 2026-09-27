@@ -239,7 +239,7 @@ function writeProjectConfig(provider: string, baseUrl: string, model: string, ap
     `# Telos configuration — written by the interactive setup wizard.\n` +
       `# Edit freely; re-run \`telos setup\` to redo this.\n\n` +
       `[model]\nprovider = "${provider}"\nname = "${model}"\nbase_url = "${baseUrl}"\napi_key_env = "${apiKeyEnv}"\n\n` +
-      `[runtime]\nautonomy = "balanced"\nmax_total_tokens = 80000\nmax_tool_calls = 40\nmax_worker_spawns = 3\nmax_parallel_workers = 2\nmax_wall_time_seconds = 900\nshell_timeout_seconds = 120\nmax_stream_attempts = 2\nmin_test_count = 1\nstream_timeout_seconds = 120\n\n` +
+      `[runtime]\nautonomy = "balanced"\n# 0 = unlimited billable tokens (cache reads excluded); wall clock still bounds the task\nmax_total_tokens = 0\nmax_tool_calls = 40\nmax_worker_spawns = 3\nmax_parallel_workers = 2\nmax_wall_time_seconds = 900\nshell_timeout_seconds = 120\nmax_stream_attempts = 2\nmin_test_count = 1\nstream_timeout_seconds = 120\n\n` +
       `[security]\nconfirm_destructive = true\nblock_secrets = true\n`,
     { mode: 0o644 },
   );

@@ -42,15 +42,24 @@ export class OpenAICompatibleProvider implements Provider {
       stream_options: { include_usage: true },
     };
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
-      },
-      body: JSON.stringify(body),
-      signal: req.signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+        },
+        body: JSON.stringify(body),
+        signal: req.signal,
+      });
+    } catch (err) {
+      // Connection-level failures (DNS blip, socket reset, "fetch failed") are
+      // retryable network faults — without this they surfaced as an instant
+      // provider_error and the user had to re-send by hand.
+      if (req.signal?.aborted) throw err;
+      throw new ProviderError(`network error contacting provider: ${(err as Error).message}`, undefined, true);
+    }
 
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");

@@ -151,11 +151,19 @@ export function parseConfig(root: Record<string, unknown>): TelosConfig {
     },
     runtime: {
       autonomy: expectEnum(runtime["autonomy"], "runtime.autonomy", ["ask", "balanced", "autonomous"] as const, "balanced"),
-      maxTotalTokens: expectInt(runtime["max_total_tokens"], "runtime.max_total_tokens", { min: 1000, fallback: 80_000 }),
-      maxToolCalls: expectInt(runtime["max_tool_calls"], "runtime.max_tool_calls", { min: 1, fallback: 40 }),
-      maxWorkerSpawns: expectInt(runtime["max_worker_spawns"], "runtime.max_worker_spawns", { min: 0, fallback: 3 }),
-      maxParallelWorkers: expectInt(runtime["max_parallel_workers"], "runtime.max_parallel_workers", { min: 0, fallback: 2 }),
-      maxWallTimeSeconds: expectInt(runtime["max_wall_time_seconds"], "runtime.max_wall_time_seconds", { min: 10, fallback: 900 }),
+      // ALL budgets default to UNLIMITED (0 where 0 is meaningful): the user
+      // opts INTO any limit. The safety rules that are not budgets — refusal
+      // of destructive/system-level commands, repetition guard, evidence-based
+      // gate — are unchanged and always on.
+      // Token ceiling: counts BILLABLE tokens (cache reads excluded).
+      maxTotalTokens: expectInt(runtime["max_total_tokens"], "runtime.max_total_tokens", { min: 0, fallback: 0 }),
+      // 0 = unlimited tool calls.
+      maxToolCalls: expectInt(runtime["max_tool_calls"], "runtime.max_tool_calls", { min: 0, fallback: 0 }),
+      // 0 = unlimited worker spawns / parallel workers.
+      maxWorkerSpawns: expectInt(runtime["max_worker_spawns"], "runtime.max_worker_spawns", { min: 0, fallback: 0 }),
+      maxParallelWorkers: expectInt(runtime["max_parallel_workers"], "runtime.max_parallel_workers", { min: 0, fallback: 0 }),
+      // 0 = no wall-clock limit.
+      maxWallTimeSeconds: expectInt(runtime["max_wall_time_seconds"], "runtime.max_wall_time_seconds", { min: 0, fallback: 0 }),
       shellTimeoutSeconds: expectInt(runtime["shell_timeout_seconds"], "runtime.shell_timeout_seconds", { min: 1, fallback: 120 }),
       maxStreamAttempts: expectInt(runtime["max_stream_attempts"], "runtime.max_stream_attempts", { min: 1, max: 5, fallback: 5 }),
       minTestCount: expectInt(runtime["min_test_count"], "runtime.min_test_count", { min: 0, fallback: 1 }),

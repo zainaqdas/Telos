@@ -58,6 +58,11 @@ export class LineEditor {
     return this.buf;
   }
 
+  /** Current cursor as a code-point offset into `value` (for panel rendering). */
+  get cursor(): number {
+    return this.pos;
+  }
+
   /** Discard partial input + pending escape + queued submits (Ctrl+C). */
   reset(): void {
     this.buf = "";

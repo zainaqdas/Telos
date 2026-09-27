@@ -90,7 +90,7 @@ Any OpenAI-compatible endpoint works out of the box: OpenAI, OpenRouter, Ollama,
 
 Telos is built on one principle: **the runtime enforces invariants; the model only provides judgment.** LLMs are capable and unreliable in equal measure, so every guarantee Telos makes is implemented in code, never in a prompt:
 
-- **Hard budgets.** Tokens, tool calls, worker spawns, parallelism, and wall clock are checked *before* every spend. A task that hits its budget stops — it is never silently exceeded, and provider usage that arrives after the fact is re-checked immediately.
+- **Hard budgets, all opt-in.** No limits are imposed by default: tokens, tool calls, worker spawns, parallelism, and wall clock are all **unlimited** unless you declare a cap in `config.toml` (or via `TELOS_*` env) — and every declared cap is checked *before* the spend and hard-enforced. The token ceiling counts **billable** tokens only — cache reads (the same prompt bytes re-billed at a discount every turn) are excluded — so a declared cap measures real work, not accounting noise. The safety rules that are not budgets (destructive-command refusal, repetition guard, evidence-based gate) are always on.
 - **One Completion Gate.** The model cannot declare success. The Gate — a single completion authority — derives its verdict from runtime evidence: passing test runs, successful builds, requirement records, skill checklists. Confident prose is never confused with verified work. Unverified edits keep the verdict INCOMPLETE; unresolved blockers keep it BLOCKED.
 - **Repetition Guard.** Every tool call is fingerprinted by command, arguments, and workspace state. The same call failing the same way twice is refused, not retried a third time — and when the state genuinely changes, the retry is allowed again.
 - **Real cancellation.** Ctrl+C terminates the task, every spawned child process, and their process trees. No orphaned servers, no half-detached builds. Pressing it again exits the session.
@@ -191,6 +191,15 @@ Declare `[model.pricing]` (USD per million tokens) and the budget bar and `/stat
 
 Notable behaviors: `/undo` restores the exact pre-edit content (or removes files the undone edit created); `/compact` derives its digest from the event log, so corrections, blockers, and open requirements survive while chatter does not; `/new` clears transcript, journal, and gate state but durable memory persists; `/correct` supersedes earlier instructions, invalidates stale work, and re-briefs waiting workers.
 
+### The docked panel (v0.1.8)
+
+On a real terminal the session renders a **bottom input panel that never scrolls away** (Pi/Hermes-style): a live status line (billable tokens, tool calls, model) plus the input box, always docked at the bottom. The transcript streams in the terminal's native scroll region above — your scrollback keeps working. The line editor renders inside the box with horizontal windowing (long input keeps the cursor visible), ↑/↓ history, and full escape-sequence editing. Terminals that report no size (or are too small) fall back to the linear prompt automatically.
+
+### Streaming UX (v0.1.8)
+
+- Model reasoning renders in a small **contained window** that always shows the latest thinking — long reasoning scrolls out of the box, never the screen — and erases when the answer starts (non-TTY output keeps the old dimmed passthrough so logs stay linear).
+- An **activity spinner with elapsed seconds** runs during model latency, so a slow first token no longer looks like a hang.
+
 ### Editing a running task
 
 - **Ctrl+C** — cancel the running task immediately (kills the process tree). Press again to exit.
@@ -276,11 +285,14 @@ cache_read_per_mtok = 0.3
 
 [runtime]
 autonomy = "balanced"          # ask | balanced | autonomous
-max_total_tokens = 80000
-max_tool_calls = 40
-max_worker_spawns = 3
-max_parallel_workers = 2
-max_wall_time_seconds = 900
+# ALL budgets are opt-in: 0 = unlimited (the default). Declare a value and it
+# is hard-enforced before the spend. Token cap counts BILLABLE tokens only
+# (cache reads excluded).
+max_total_tokens = 0
+max_tool_calls = 0
+max_worker_spawns = 0
+max_parallel_workers = 0
+max_wall_time_seconds = 0
 shell_timeout_seconds = 120
 max_stream_attempts = 2
 min_test_count = 1             # exit-0 suites reporting fewer tests are not verification (0 disables)

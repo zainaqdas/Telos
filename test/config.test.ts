@@ -29,12 +29,14 @@ flag = true
 
 test("config defaults apply and validation rejects bad enums", () => {
   const ok = parseConfig({});
-  assert.equal(ok.runtime.maxTotalTokens, 80_000);
+  // Budget realism (v0.1.8): 0 = unlimited billable tokens is the default —
+  // a long task must not die on an accounting number.
+  assert.equal(ok.runtime.maxTotalTokens, 0);
   assert.equal(ok.runtime.autonomy, "balanced");
   assert.equal(ok.model.apiKeyEnv, "TELOS_API_KEY");
 
   assert.throws(() => parseConfig({ model: { provider: "warp-drive" } }), /expected one of/);
-  assert.throws(() => parseConfig({ runtime: { max_total_tokens: 5 } }), /must be >=/);
+  assert.throws(() => parseConfig({ runtime: { max_total_tokens: -5 } }), /must be >=/);
   assert.throws(() => parseConfig({ runtime: { autonomy: "chaos" } }), /expected one of/);
 });
 

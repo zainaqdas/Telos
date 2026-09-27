@@ -28,6 +28,8 @@ import { registerPlanTools } from "../tools/plan-tool.ts";
 import { restRenderMarkdown } from "./rest-render.ts";
 import { StreamPrinter, streamWidth } from "./stream-printer.ts";
 import { LineEditor } from "./line-editor.ts";
+import { ThinkingWindow, Spinner } from "./thinking-window.ts";
+import { Panel } from "./panel.ts";
 import { partitionSteering } from "../manager/steering.ts";
 import { loadSkills } from "../skills/loader.ts";
 import { SkillRouter } from "../skills/router.ts";
@@ -274,6 +276,9 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   let historyDraft = "";
   const editor = new LineEditor({
     onEcho: (s) => {
+      // While a run streams, keystrokes must not paint over the output —
+      // input is captured silently and the prompt repaints the buffered line
+      // after the run (prompt() calls editor.repaint()).
       if (!rendering) process.stdout.write(s);
     },
     historyNav: (dir) => {
@@ -299,21 +304,60 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     },
   });
 
-  printBanner(config, taskId, modelLimits);
-  renderBudgetBar(budget);
+  // Banner/budget print AFTER the panel installs so they land in the scroll
+  // region (on a TTY) instead of above it.
 
   // Streamed model text goes through the printer: raw passthrough on a TTY
   // (the terminal wraps), word-boundary wrapping at terminal width otherwise.
   const printer = new StreamPrinter({ width: isRawSupported ? Number.POSITIVE_INFINITY : streamWidth(process.stdout, process.env) });
+  // Contained thinking window (v0.1.8): reasoning renders in a fixed-height
+  // box that always shows the LATEST thinking — long reasoning scrolls out of
+  // the BOX, never the screen — and is erased when the answer starts. Pipe
+  // mode keeps the old dimmed passthrough (linear logs).
+  const thinkingWindow = new ThinkingWindow({
+    write: (s) => process.stdout.write(s),
+    width: isRawSupported ? streamWidth(process.stdout, process.env) : Number.POSITIVE_INFINITY,
+  });
+  // Activity spinner (v0.1.8): the model's latency before the first token no
+  // longer looks like a hang. Started per run, stopped at first visible token.
+  // The spinner stays for pipe mode; on a TTY the panel's live status line
+  // plays that role (an animating frame below the scroll region would fight
+  // the panel repaints).
+  const spinner = new Spinner({ write: (s) => process.stdout.write(s) });
+
+  // Docked input panel (v0.1.8, Pi/Hermes-style): TTY-only. The terminal's
+  // scroll region covers the transcript; the status line + input box live
+  // BELOW it and never scroll away. Piped sessions keep linear output.
+  const panel = new Panel({
+    write: (s) => process.stdout.write(s),
+    // Some ptys report 0 before the first SIGWINCH — coerce to sane defaults.
+    width: () => process.stdout.columns || 100,
+    height: () => process.stdout.rows || 30,
+    renderStatus: () => `budget ${budget.used.tokens}${budget.limitsValue.maxTotalTokens > 0 ? "/" + budget.limitsValue.maxTotalTokens : " (no cap)"} · tools ${budget.used.toolCalls} · ${config.model.provider}/${config.model.name}`,
+  });
+
+  if (isRawSupported) {
+    panel.install();
+    stdin.on("resize", () => panel.onResize());
+    // All transcript output now routes through the panel's scroll region.
+    outSink = (text: string): void => {
+      panel.print(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+    };
+  }
+  printBanner(config, taskId, modelLimits);
+  renderBudgetBar(budget);
 
   const prompt = (): void => {
-    process.stdout.write(`\n> `);
-    editor.repaint(); // reveal any input buffered while a run was busy
+    // The panel IS the prompt on a TTY; nothing to print. On a pipe, keep
+    // the traditional `> ` line.
+    if (!panel.active) process.stdout.write(`\n> `);
+    panel.setInput(editor.value, editor.cursor);
   };
   prompt();
 
   const onKeypress = (buf: Buffer): void => {
     const res = editor.feed(buf.toString("utf8"));
+    panel.setInput(editor.value, editor.cursor);
     // A paste burst can carry multiple Enters in one chunk: hand every
     // completed line to handleLine (it queues while busy — nothing is lost).
     for (const line of editor.takeSubmitted()) {
@@ -371,6 +415,10 @@ export async function runSession(opts: SessionOpts): Promise<number> {
   const shutdown = (code: number): void => {
     if (isRawSupported) stdin.setRawMode(false);
     stdin.removeListener("data", onKeypress);
+    outSink = (text: string): void => {
+      process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+    };
+    panel.teardown(); // restore scroll region + cursor before final output
     void closeBrowserSession(); // no orphaned browser (same discipline as shell children)
     closeMcpClients(mcpClients); // MCP servers die with the session
     stateStore.dispose(); // release the append listener
@@ -505,6 +553,8 @@ export async function runSession(opts: SessionOpts): Promise<number> {
     rendering = true;
     const started = Date.now();
     lastInstruction = text;
+    panel.setBusy(true);
+    if (isRawSupported && !panel.active) spinner.start("thinking");
     // A previous cancellation must not poison this run: cancel stops the
     // CURRENT task, not the rest of the session (Part 62). The ctx signal is
     // re-issued so network/shell tools track the live scope.
@@ -517,22 +567,26 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       const result = await manager.run(text, {
         isCorrection,
         images: images.map((i) => ({ mediaType: i.mediaType, data: i.data })),
-        onText: (delta) => printer.push(delta),
-        onThinking: (delta) => printer.thinking(delta),
+        onText: (delta) => {
+          if (spinner.running) {
+            spinner.stop();
+            thinkingWindow.end(); // answer begins: erase the thinking box
+          }
+          printer.push(delta);
+        },
+        onThinking: (delta) => {
+          if (spinner.running) spinner.stop();
+          if (!panel.active) thinkingWindow.push(delta); // panel status shows liveness on TTY
+        },
         onTool: (name, summary) => {
+          thinkingWindow.end(); // tool lines must not land inside the box
           printer.newline();
           out(`  ⚙ ${name}  ${summary}`);
         },
       });
+      spinner.stop();
+      thinkingWindow.end();
       printer.end();
-      // Markdown rest-render (Scale Batch 5): the raw stream already showed
-      // progress live; the finished answer is re-printed cleanly — fences
-      // get minimal syntax-agnostic highlighting, headings get weight.
-      if (result.assistantText.trim()) {
-        out("");
-        restRenderMarkdown(result.assistantText, { width: isRawSupported ? Number.POSITIVE_INFINITY : streamWidth(process.stdout, process.env) });
-      }
-      renderCurrentPlan();
       const elapsed = ((Date.now() - started) / 1000).toFixed(1);
       out(`\n[${result.status} in ${elapsed}s]`);
       if (result.gate) out(`Gate: ${result.gate.verdict} — ${result.gate.summary}`);
@@ -540,6 +594,7 @@ export async function runSession(opts: SessionOpts): Promise<number> {
       renderBudgetBar(budget, orchestrator.waitingWorkerIds().length);
     } finally {
       rendering = false;
+      panel.setBusy(false);
       prompt();
     }
   };
@@ -646,7 +701,7 @@ async function handleSlashCommand(
       const openObjections = state.objections.filter((o) => !o.resolved).length;
       out([
         `model      ${deps.config.model.provider}/${deps.config.model.name}`,
-        `tokens     ${u.tokens} / ${l.maxTotalTokens}`,
+        `tokens     ${u.tokens}${l.maxTotalTokens > 0 ? ` / ${l.maxTotalTokens}` : " (no cap)"} (billable — cache reads excluded)`,
         `tool calls ${u.toolCalls} / ${l.maxToolCalls}`,
         `workers    ${u.workersSpawned} / ${l.maxWorkerSpawns} (parallel ${u.runningWorkers}/${l.maxParallelWorkers})${deps.orchestrator.activeWorkerIds().length ? ` · live: ${deps.orchestrator.activeWorkerIds().join(", ")} (/stop <id>)` : ""}`,
         `waiting    ${waiting.length ? waiting.join(", ") : "(none)"}`,
@@ -902,8 +957,18 @@ async function fetchModelList(model: { provider: string; baseUrl: string; apiKey
 // the session wiring.
 import { gitSnapshot, gitUndoToSnapshot } from "./session-undo.ts";
 
-function out(text: string): void {
+/**
+ * Transcript output. On a TTY the session installs a panel sink (routes every
+ * line into the scroll region above the docked input panel); otherwise lines
+ * go straight to stdout. Defined as a mutable sink because the panel only
+ * exists after the editor/budget are wired, while `out` is used from line 1.
+ */
+let outSink: (text: string) => void = (text: string): void => {
   process.stdout.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+};
+
+function out(text: string): void {
+  outSink(text);
 }
 
 /** Latest plan steps from the event log (LAST plan_updated wins). */
@@ -932,7 +997,7 @@ function printBanner(config: TelosConfig, taskId: string, limits?: { contextWind
   out([
     `Telos — ${config.model.provider}/${config.model.name || "(model unset)"}  [${keyEnv}: ${hasKey ? "present" : "MISSING"}]${limitsText}`,
     `task ${taskId}`,
-    `budgets: ${config.runtime.maxTotalTokens} tokens · ${config.runtime.maxToolCalls} tool calls · ${config.runtime.maxWallTimeSeconds}s wall`,
+    `budgets: ${config.runtime.maxTotalTokens > 0 ? `${config.runtime.maxTotalTokens} tokens (billable; cache reads excluded)` : "unlimited tokens (billable)"} · ${config.runtime.maxToolCalls} tool calls · ${config.runtime.maxWallTimeSeconds}s wall`,
     `Ctrl+C cancels the running task · Ctrl+C again exits · /help for commands`,
   ].join("\n"));
 }
@@ -940,12 +1005,14 @@ function printBanner(config: TelosConfig, taskId: string, limits?: { contextWind
 function renderBudgetBar(budget: BudgetEnforcer, waitingWorkers = 0): void {
   const u = budget.used;
   const l = budget.limitsValue;
-  const tokPct = Math.min(100, Math.round((u.tokens / Math.max(1, l.maxTotalTokens)) * 100));
+  // maxTotalTokens = 0 means unlimited: show the live billable count instead
+  // of a fake percentage against nothing.
+  const tokInfo = l.maxTotalTokens > 0 ? `tokens ${u.tokens}/${l.maxTotalTokens} (${Math.min(100, Math.round((u.tokens / l.maxTotalTokens) * 100))}%)` : `tokens ${u.tokens} (no cap)`;
   const toolPct = Math.min(100, Math.round((u.toolCalls / Math.max(1, l.maxToolCalls)) * 100));
   const waitInfo = waitingWorkers > 0 ? ` · waiting: ${waitingWorkers}` : "";
   // Cost appears only when the user declared pricing or the provider reports
   // it — an estimate is never invented (Part 24).
   const cost = budget.costEstimateUsd;
   const costInfo = cost !== null ? ` · $${cost.toFixed(4)}` : "";
-  out(`budget: tokens ${u.tokens}/${l.maxTotalTokens} (${tokPct}%) · tools ${u.toolCalls}/${l.maxToolCalls} (${toolPct}%)${costInfo}${waitInfo}`);
+  out(`budget: ${tokInfo} · tools ${u.toolCalls}/${l.maxToolCalls} (${toolPct}%)${costInfo}${waitInfo}`);
 }

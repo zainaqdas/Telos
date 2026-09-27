@@ -6,11 +6,26 @@ import type { Usage } from "../providers/types.ts";
  * `null` cost means "unknown", not "free" (Part 24).
  */
 export interface BudgetLimits {
+  /** ALL limits: 0 = unlimited (the user opts into every cap). */
   maxTotalTokens: number;
   maxToolCalls: number;
   maxWorkerSpawns: number;
   maxParallelWorkers: number;
   maxWallTimeSeconds: number;
+}
+
+/**
+ * Tokens counted against the ceiling (Budget realism fix, v0.1.8).
+ *
+ * Cache READS are not ceiling tokens: they are the same prompt bytes being
+ * re-billed at a discount (or free) and they dominate every turn after the
+ * first — counting them meant a 5-minute chat session "burned" 100k tokens
+ * while doing ~2k tokens of real work. Billed OUTPUT and the fresh (uncached)
+ * input portion DO count: they are the actual per-request cost drivers.
+ * Cached reads still appear in `usage.cachedTokens` for cost math.
+ */
+export function billableTokens(u: Usage): number {
+  return Math.max(0, u.totalTokens - u.cachedTokens);
 }
 
 export interface UsageState {
@@ -58,29 +73,31 @@ export class BudgetEnforcer {
   /** Check whether a spend would be within budget, without recording it. */
   check(kind: SpendKind, estimatedTokens = 0, now?: () => number): BudgetVerdict {
     const clock = now ?? this.nowFn;
-    if (this.state.tokens + estimatedTokens > this.limits.maxTotalTokens) {
+    if (this.limits.maxTotalTokens > 0 && this.state.tokens + estimatedTokens > this.limits.maxTotalTokens) {
       return { allowed: false, resource: "tokens", message: `token budget ${this.state.tokens + estimatedTokens}/${this.limits.maxTotalTokens}` };
     }
     switch (kind) {
       case "model_call":
         break; // tokens are the binding constraint for model calls
       case "tool_call":
-        if (this.state.toolCalls + 1 > this.limits.maxToolCalls) {
+        if (this.limits.maxToolCalls > 0 && this.state.toolCalls + 1 > this.limits.maxToolCalls) {
           return { allowed: false, resource: "tool_calls", message: `tool calls ${this.state.toolCalls + 1}/${this.limits.maxToolCalls}` };
         }
         break;
       case "worker_spawn":
-        if (this.state.workersSpawned + 1 > this.limits.maxWorkerSpawns) {
+        if (this.limits.maxWorkerSpawns > 0 && this.state.workersSpawned + 1 > this.limits.maxWorkerSpawns) {
           return { allowed: false, resource: "worker_spawns", message: `worker spawns ${this.state.workersSpawned + 1}/${this.limits.maxWorkerSpawns}` };
         }
-        if (this.state.runningWorkers + 1 > this.limits.maxParallelWorkers) {
+        if (this.limits.maxParallelWorkers > 0 && this.state.runningWorkers + 1 > this.limits.maxParallelWorkers) {
           return { allowed: false, resource: "parallel_workers", message: `parallel workers ${this.state.runningWorkers + 1}/${this.limits.maxParallelWorkers}` };
         }
         break;
     }
-    const elapsedSeconds = (clock() - this.state.startedAt) / 1000;
-    if (elapsedSeconds > this.limits.maxWallTimeSeconds) {
-      return { allowed: false, resource: "wall_time", message: `wall time ${Math.round(elapsedSeconds)}s/${this.limits.maxWallTimeSeconds}s` };
+    if (this.limits.maxWallTimeSeconds > 0) {
+      const elapsedSeconds = (clock() - this.state.startedAt) / 1000;
+      if (elapsedSeconds > this.limits.maxWallTimeSeconds) {
+        return { allowed: false, resource: "wall_time", message: `wall time ${Math.round(elapsedSeconds)}s/${this.limits.maxWallTimeSeconds}s` };
+      }
     }
     return { allowed: true };
   }
@@ -96,7 +113,8 @@ export class BudgetEnforcer {
   }
 
   recordUsage(usage: Usage): void {
-    this.state.tokens += usage.totalTokens;
+    // Billable tokens only (cache reads excluded — see billableTokens).
+    this.state.tokens += billableTokens(usage);
     this.state.inputTokens += usage.inputTokens;
     this.state.outputTokens += usage.outputTokens;
     this.state.cachedTokens += usage.cachedTokens;
