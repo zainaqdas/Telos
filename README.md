@@ -124,6 +124,22 @@ CompletionGate (src/gate)           the single completion authority
 EventLog (JSONL) → reducer → TeamState    append-only, authoritative
 ```
 
+### Built for large repositories and long projects
+
+Telos v0.1.6 ships five scale batches (design and commit trail in [`docs/SCALE_ROADMAP.md`](docs/SCALE_ROADMAP.md)). The features that matter when your repo is big and the task is long:
+
+**Fast navigation.** `search_text` and `find_files` spawn **ripgrep when it's on PATH** (`.gitignore` respected for free, thousands of files searched in ~1s) and fall back to a pure-Node walk when it isn't — nothing is bundled or downloaded. The system prompt carries a token-budgeted repository map (file counts per directory) generated from `git ls-files`, and `read_file` handles big files with offset/limit slices, per-line truncation markers, and binary sniffing.
+
+**Context economy.** Tool outputs past the transcript cap are **spilled** to `.project-agent/spill/` with a read-back path — nothing the model might need is lost, but the context stays small. Model limits come from a vendored catalog (context window, observed output caps — gateways that silently cap completions are surfaced in the banner: `context 8k · out ~4k (capped)`) and drive automatic compaction. Large files are written in chunks (`write_file` + `append_file`) so the provider's output cap can't truncate a tool call mid-JSON.
+
+**Reliable edits and rollback.** `edit_file` tries an exact match, then whitespace-normalized, then blank-line-tolerant — and on a miss reports the **closest matching line and character delta** so the model fixes the anchor in one retry. After every edit a zero-dep syntax check runs (`node --check`, `JSON.parse`, balance heuristic) and reports `syntax: OK` / `syntax: SUSPECT` inline. `/undo` is **git-backed when you're in a repo**: the workspace is snapshotted onto a private ref (`refs/telos/snapshot` — no commits, invisible to `git log`) before the first write, and undo restores the whole workspace in one step, removing files the agent created. Outside git, the per-edit journal still has you.
+
+**Parallel reads, mid-turn steering, resilient retries.** Consecutive read-only tool calls in one turn execute **in parallel**; mutations stay strictly sequential and can never run alongside other tools. Lines you type while the agent works **steer mid-turn**: they join the context at the next tool-call boundary instead of waiting for the run to end (slash commands keep working exactly as before). Provider failures retry with exponential backoff + jitter, honoring the gateway's `retry-after` hint — every wait is visible (`provider retrying in 2.0s (rate limit; attempt 1/5)`).
+
+**Workers that investigate, a manager that builds.** The `explorer`/`researcher`/`reviewer` roles are read-only **enforced at the registry layer** — no mutative tool can reach them even if an allowlist or MCP server lists one — and they must cite `path:line` evidence. Each delegation carries its **own tool-call/token sub-budget** (reported in the delegation event), so a swarm of workers can't starve the manager; an exhausted worker wraps up and reports instead of burning the shared budget.
+
+**Keeping the plot on long builds.** The model records its plan with `set_plan`/`update_plan` — first-class `plan_updated` events the **Completion Gate audits**: unfinished plan steps keep the task open, so a 30-file build can't quietly drift off-course. The current plan renders after every turn. Your repo's own `AGENTS.md`/`TELOS.md` (root + parents) are injected as **project conventions**; at turn end, answers are **re-rendered** with minimal code-fence highlighting; and gateways that inline reasoning as `<think>…</think>` in content get it split out and dimmed during streaming.
+
 ### The Manager is the primary builder
 
 The Manager does the work itself: reading files, editing code, running tests. When broader investigation helps, it can delegate to **task-scoped, read-only specialists** through a budget-enforced `delegate` tool:
@@ -165,7 +181,7 @@ Declare `[model.pricing]` (USD per million tokens) and the budget bar and `/stat
 | `/profile` | repository profile | `/diff` working-tree diff summary |
 | `/skills` | available + active skills | `/memory` durable memory contents |
 | `/collab` | proposals, blockers, objections | `/image <path>` attach an image |
-| `/undo` | revert the last workspace write | `/retry` re-run the previous instruction |
+| `/undo` | revert workspace writes (git-backed whole-workspace restore in repos) | `/retry` re-run the previous instruction |
 | `/compact` | fold transcript into an event-log digest | `/new` `/clear` fresh task |
 | `/model <name>` | show or switch model | `/models` live model catalog |
 | `/provider` | provider catalog + key status | `/waive <id> [for 2h]` waive a blocker |
@@ -307,7 +323,7 @@ Add `.project-agent/` to `.gitignore` if you don't want task history in your rep
 
 ```bash
 npm install
-npm test                  # 157 tests: unit, process-tree, e2e
+npm test                  # 210 tests: unit, process-tree, e2e, scale batches
 npm run typecheck
 npm run eval:scenarios    # scenario evals: correction, repetition, gate, budgets, cancellation
 npm run eval:acceptance   # verbatim acceptance tasks (tiny / research / complex bug / skill-blocked)

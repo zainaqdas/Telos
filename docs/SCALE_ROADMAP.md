@@ -1,5 +1,20 @@
 # Scale roadmap: large repositories, long codebases, large projects
 
+**STATUS (2026-09-27): ALL FIVE BATCHES SHIPPED.** Test suite 210/210, `tsc --noEmit` clean,
+shipped as `@zainaqdas/telos@0.1.6`.
+
+| Batch | Theme | Commit | Tests |
+|---|---|---|---|
+| 1 | See the repository (search, profile, read caps) | `a334bdb` | `test/large-repo.test.ts` |
+| 2 | Survive the context (spill, catalog, compaction) | `d454f50` | `test/scale-batch2.test.ts` |
+| 3 | Edit reliably at scale (fuzzy ladder, syntax check, git /undo) | `118a8c8` | `test/scale-batch3.test.ts` |
+| 4 | Delegate and steer (parallel reads, steering, retry v2) | `fca2f20` | `test/scale-batch4.test.ts` |
+| 5 | Long-project polish (conventions, plan, few-shot, rest-render, sub-budgets, `<think>`) | `6eae4f1` | `test/scale-batch5.test.ts` |
+
+Release bump: `45c506b` → v0.1.6.
+
+---
+
 Goal (user directive, 2026-09-26): Telos must handle a large repository / long codebase, and build
 large projects — without regressing the core philosophy: the runtime enforces invariants, the
 Completion Gate decides from evidence, zero runtime dependencies, event-sourced everything.
@@ -140,5 +155,27 @@ manager must not burn its own context on exploration.*
 Batches are independent enough to ship separately, but 1 → 2 is the critical path for *large
 repos*, and 2 → 3 for *large projects*. Batch 2's catalog (item 5) unblocks 2.6, 5.19, and the
 banner work, so it lands early inside Batch 2. Each batch: implementation → unit tests →
-large-repo harness additions → full suite → live harness on vyceai → commit/push (zainaqdas, no
-trailers) → version bump for npm release at milestones (not per batch).
+large-repo harness additions → full suite → live harness on vyceai → commit/push (zainaqdas) →
+version bump for npm release at milestones (not per batch).
+
+## Shipped-variance notes (implementation vs. plan)
+
+- **Item 2 (search):** spawned-rg with pure-Node fallback shipped as `src/tools/search-engine.ts`;
+  result caps now scale with the engine (Batch 1).
+- **Item 4 (spill):** shipped as `spillToolOutput` in the manager loop writing
+  `.project-agent/spill/`; transcripts keep a bounded 8k-char head plus a read-back path (Batch 2).
+- **Item 6 (compaction trigger):** shipped as model-catalog-driven `compactionThreshold` + the
+  existing reducer-informed `compactMessages`; per-output pruning is covered by the spill path
+  (Batch 2).
+- **Item 7 (prompt-cache stability):** tool order is canonical via the registry's stable-order
+  disabled-notice work; write-tool stripping keeps placeholders via refcounted `setDisabled`
+  (Batch 2).
+- **Item 10 (git /undo):** snapshot ref is `refs/telos/snapshot`, taken on the FIRST write via the
+  journal hook (not run start); post-snapshot files are computed from a throwaway index BEFORE
+  `read-tree` because untracked files are invisible to `git diff` (Batch 3).
+- **Item 13 (steering):** drain polls AFTER tool results are on the transcript (assistant→tool
+  adjacency for strict OpenAI-compatible gateways), not before (Batch 4).
+- **Item 19 (per-worker budgets):** sub-budget is a fixed bounded share
+  (`WORKER_SUB_BUDGET`, 30 tool calls / 120k tokens) reported in the delegation event; exhaustion
+  degrades the worker gracefully instead of hard-stopping the run — the shared budget remains the
+  hard stop (Batch 5).
